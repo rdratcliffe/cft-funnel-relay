@@ -12,18 +12,22 @@ def ghl(path, payload):
 
 CORS = {"Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"}
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Content-Type": "application/json"}
+
+def resp(code, body):
+    return {"statusCode": code, "headers": CORS, "body": json.dumps(body)}
 
 def main(event):
     method = event.get("http", {}).get("method", "POST").upper()
     if method == "OPTIONS":
-        return {"statusCode": 204, "headers": CORS, "body": ""}
+        return {"statusCode": 204, "headers": CORS, "body": "{}"}
 
     first = (event.get("first_name") or "").strip()
     phone = (event.get("phone") or "").strip()
     email = (event.get("email") or "").strip()
     if not first or not (phone or email):
-        return {"statusCode": 400, "headers": CORS, "body": {"ok": False, "error": "first_name and phone or email required"}}
+        return resp(400, {"ok": False, "error": "first_name and phone or email required"})
 
     loc = os.environ["GHL_LOCATION"]
     tags = ["funnel-lead"]
@@ -64,6 +68,6 @@ def main(event):
                 "body": note, "dueDate": "2099-01-01T00:00:00Z", "completed": False})
         except Exception:
             pass
-        return {"statusCode": 200, "headers": CORS, "body": {"ok": True}}
+        return resp(200, {"ok": True})
     except Exception as e:
-        return {"statusCode": 200, "headers": CORS, "body": {"ok": False, "error": str(e)[:200]}}
+        return resp(200, {"ok": False, "error": str(e)[:200]})
