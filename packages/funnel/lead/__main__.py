@@ -44,6 +44,9 @@ def main(event):
     if not first or not (phone or email):
         return resp(400, {"ok": False, "error": "first_name and phone or email required"})
 
+    missing = [k for k in ("GHL_KEY","GHL_LOCATION","PIPELINE_ID","STAGE_ID") if not os.environ.get(k)]
+    if missing:
+        return resp(200, {"ok": False, "error": "server config missing: " + ",".join(missing)})
     loc = os.environ["GHL_LOCATION"]
     tags = ["funnel-lead"]
     if (d.get("sms_consent") or "") == "yes":
