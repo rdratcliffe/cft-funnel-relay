@@ -1,0 +1,6 @@
+packages:
+  - name: funnel
+    functions:
+      - name: lead
+        runtime: python:default
+        web: true
