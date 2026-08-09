@@ -4,3 +4,6 @@ packages:
       - name: lead
         runtime: python:default
         web: true
+      - name: ping
+        runtime: python:default
+        web: true
