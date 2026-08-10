@@ -11,7 +11,8 @@ CORS = {"Access-Control-Allow-Origin": "*",
 def ghl(path, payload):
     req = urllib.request.Request(GHL + path, data=json.dumps(payload).encode(),
         headers={"Authorization": "Bearer " + os.environ["GHL_KEY"],
-                 "Version": "2021-07-28", "Content-Type": "application/json"})
+                 "Version": "2021-07-28", "Content-Type": "application/json",
+                 "User-Agent": "cft-funnel-relay/1.0", "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.load(r)
 
