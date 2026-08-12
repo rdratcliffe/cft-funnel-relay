@@ -29,6 +29,8 @@ def process(d):
     try:
         payload = {"locationId": loc, "firstName": first,
                    "lastName": (d.get("last_name") or "").strip(),
+                   "address1": (d.get("street_address") or "").strip(),
+                   "city": (d.get("city") or "").strip(),
                    "postalCode": (d.get("zip") or "").strip(),
                    "tags": tags,
                    "source": (d.get("utm_source") or "").strip() or "Funnel"}

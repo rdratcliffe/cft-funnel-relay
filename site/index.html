@@ -235,14 +235,18 @@ footer.site b{color:#fff;font-family:var(--font-display)}
             <div><label for="email">Email</label><input id="email" name="email" type="email" required autocomplete="email"></div>
           </div>
           <div class="row">
+            <div><label for="street">Street address</label><input id="street" name="street_address" required autocomplete="street-address"></div>
+            <div><label for="city">City</label><input id="city" name="city" required autocomplete="address-level2"></div>
+          </div>
+          <div class="row">
             <div><label for="zip">ZIP code</label><input id="zip" name="zip" inputmode="numeric" pattern="[0-9]{5}" required autocomplete="postal-code"></div>
-            <div><label for="interest">What are you lighting?</label>
+            <div><label for="interest">What are you interested in having done?</label>
               <select id="interest" name="interest" required>
                 <option value="" selected disabled>Choose one</option>
-                <option>House / roofline</option>
-                <option>Pool cage or patio</option>
+                <option>House / roofline lighting</option>
+                <option>Pool cage or patio lighting</option>
                 <option>Landscape lighting</option>
-                <option>Business / storefront</option>
+                <option>Business / storefront lighting</option>
                 <option>Not sure yet</option>
               </select>
             </div>
