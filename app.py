@@ -1,6 +1,33 @@
-"""CFT funnel lead relay - tiny HTTP service (App Platform web service)."""
-import os, json, urllib.request
+"""CFT funnel lead relay + Funnel Scorecard dashboard (App Platform web service)."""
+import os, json, threading, time as _time, urllib.request, urllib.parse
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import collector
+
+DASH = {"data": None, "ts": 0.0, "lock": threading.Lock(), "running": False}
+
+def _collect_now():
+    with DASH["lock"]:
+        if DASH["running"]:
+            return
+        DASH["running"] = True
+    try:
+        DASH["data"] = collector.collect()
+        DASH["ts"] = _time.time()
+    except Exception as e:
+        DASH["data"] = {"error": str(e)[:300], "generated_at": datetime.now(timezone.utc).isoformat()}
+    finally:
+        DASH["running"] = False
+
+def _daily_loop():
+    _collect_now()
+    while True:
+        now = datetime.now(timezone.utc)
+        target = now.replace(hour=9, minute=30, second=0, microsecond=0)  # 05:30 ET daily
+        if target <= now:
+            target = target + timedelta(days=1)
+        _time.sleep(max(60, (target - now).total_seconds()))
+        _collect_now()
 
 GHL = "https://services.leadconnectorhq.com"
 CORS = {"Access-Control-Allow-Origin": "*",
@@ -76,6 +103,32 @@ class H(BaseHTTPRequestHandler):
         for k, v in CORS.items(): self.send_header(k, v)
         self.end_headers()
     def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        key_ok = qs.get("key", [""])[0] == os.environ.get("DASH_KEY", "") and os.environ.get("DASH_KEY")
+        if parsed.path == "/dash":
+            if not key_ok:
+                self._send(401, {"ok": False, "error": "key required"}); return
+            try:
+                with open(os.path.join(os.path.dirname(__file__), "dash.html"), "rb") as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)[:200]})
+            return
+        if parsed.path == "/dash/data":
+            if not key_ok:
+                self._send(401, {"ok": False, "error": "key required"}); return
+            if qs.get("refresh", ["0"])[0] == "1" or DASH["data"] is None:
+                _collect_now()
+            self._send(200, {"ok": True, "stale_seconds": int(_time.time() - DASH["ts"]) if DASH["ts"] else None,
+                             "report": DASH["data"]})
+            return
         self._send(200, {"ok": True, "service": "cft-funnel-relay"})
     def do_POST(self):
         try:
@@ -88,4 +141,5 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
 if __name__ == "__main__":
+    threading.Thread(target=_daily_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), H).serve_forever()

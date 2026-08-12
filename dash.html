@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>CFT Funnel Scorecard</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,.10);
+  --series-1: #2a78d6; --delta-good: #006300;
+  --st-good: #0ca30c; --st-warn: #fab219; --st-serious: #ec835a; --st-crit: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
+    --series-1: #3987e5; --delta-good: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19;
+  --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
+  --series-1: #3987e5; --delta-good: #0ca30c;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--page); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 24px; }
+.wrap { max-width: 1100px; margin: 0 auto; }
+header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+h1 { font-size: 1.25rem; font-weight: 700; }
+.meta { color: var(--muted); font-size: .8rem; }
+button { background: var(--surface); color: var(--ink); border: 1px solid var(--ring); border-radius: 8px; padding: 6px 14px; font: inherit; font-size: .85rem; cursor: pointer; }
+h2 { font-size: .82rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); margin: 26px 0 10px; }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 14px 16px; }
+.tile .v { font-size: 1.7rem; font-weight: 700; line-height: 1.2; }
+.tile .l { font-size: .78rem; color: var(--muted); margin-top: 2px; }
+.tile .s { font-size: .75rem; color: var(--ink-2); margin-top: 4px; }
+.alarm { display: flex; gap: 10px; align-items: baseline; padding: 10px 16px; border-bottom: 1px solid var(--grid); }
+.alarm:last-child { border-bottom: 0; }
+.chip { font-size: .72rem; font-weight: 700; white-space: nowrap; }
+.alarm .d { color: var(--ink-2); font-size: .88rem; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: .88rem; }
+th { text-align: left; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; padding: 10px 12px 6px; border-bottom: 1px solid var(--axis); }
+td { padding: 8px 12px; border-bottom: 1px solid var(--grid); }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; }
+.tbl-scroll { overflow-x: auto; }
+.spark { display: block; }
+.src { color: var(--muted); font-size: .78rem; }
+.foot { color: var(--muted); font-size: .75rem; margin: 28px 0 8px; }
+.err { color: var(--st-crit); padding: 20px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div><h1>CFT Funnel Scorecard</h1><div class="meta" id="meta">loading…</div></div>
+    <button id="refresh">Refresh from source</button>
+  </header>
+  <div id="app"><div class="meta">Pulling every signal from its system of record — first load computes live and can take a minute…</div></div>
+  <p class="foot">Every number is computed stateless from its system of record per the Signal Contract (09-Systems). Meta ledger = leads · GHL calls = contacted · HCP calendar = booked · HCP jobs = won.</p>
+</div>
+<script>
+const KEY = new URLSearchParams(location.search).get("key") || "";
+const ST = { good: ["✓", "var(--st-good)", "GOOD"], warning: ["⚠", "var(--st-warn)", "WARNING"],
+             serious: ["▲", "var(--st-serious)", "SERIOUS"], critical: ["✕", "var(--st-crit)", "CRITICAL"] };
+const fmt$ = v => "$" + Math.round(v).toLocaleString();
+const pct = (a, b) => b ? Math.round(100 * a / b) + "%" : "–";
+
+function spark(vals, w = 220, h = 44) {
+  if (!vals.length) return "";
+  const max = Math.max(...vals, 1), min = 0;
+  const px = i => 4 + i * (w - 8) / Math.max(vals.length - 1, 1);
+  const py = v => h - 6 - (v - min) * (h - 14) / (max - min || 1);
+  const pts = vals.map((v, i) => `${px(i)},${py(v)}`).join(" ");
+  const last = vals[vals.length - 1];
+  return `<svg class="spark" width="${w}" height="${h}" role="img" aria-label="CPL trend">
+    <line x1="4" y1="${h-6}" x2="${w-4}" y2="${h-6}" stroke="var(--axis)" stroke-width="1"/>
+    <polyline points="${pts}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="${px(vals.length-1)}" cy="${py(last)}" r="4" fill="var(--series-1)" stroke="var(--surface)" stroke-width="2"/>
+  </svg>`;
+}
+
+function render(rep) {
+  const f = rep.funnel, t = f.total;
+  const cplDaily = rep.daily.map(d => {
+    const s = (d.A.spend || 0), n = d.ledger_leads || 0;
+    return n ? s / n : null;
+  }).filter(v => v !== null);
+  const blendedCPL = t.leads ? (t.spend / t.leads) : 0;
+  let html = "";
+
+  html += `<h2>Watchdog</h2><div class="card">` + rep.alarms.map(a => {
+    const [icon, color, label] = ST[a.level] || ST.warning;
+    return `<div class="alarm"><span class="chip" style="color:${color}">${icon} ${label} · ${a.code}</span><span class="d">${a.detail}</span></div>`;
+  }).join("") + `</div>`;
+
+  html += `<h2>Since relaunch (${rep.epoch})</h2><div class="tiles">
+    <div class="tile"><div class="v">${t.leads}</div><div class="l">Leads (ledger + relay)</div></div>
+    <div class="tile"><div class="v">${fmt$(blendedCPL)}</div><div class="l">Blended CPL</div><div class="s">${fmt$(t.spend)} spend</div></div>
+    <div class="tile"><div class="v">${pct(t.contacted, t.leads)}</div><div class="l">Contacted (real calls)</div></div>
+    <div class="tile"><div class="v">${t.booked}</div><div class="l">Estimates booked (HCP)</div></div>
+    <div class="tile"><div class="v">${t.won}</div><div class="l">Won (HCP jobs)</div><div class="s">${fmt$(t.revenue)} revenue</div></div>
+    <div class="tile"><div class="v">${rep.sla.median_min ?? "–"}<span style="font-size:.9rem"> min</span></div><div class="l">Median speed-to-lead</div><div class="s">${rep.sla.breaches} breach(es)</div></div>
+  </div>`;
+
+  html += `<h2>Cost per lead by day — Campaign A ${spark(cplDaily)}</h2>`;
+  html += `<div class="card tbl-scroll"><table><thead><tr>
+    <th>Date</th><th class="num">A spend</th><th class="num">B spend</th><th class="num">Form leads</th><th class="num">CPL</th><th class="num">B landing views</th></tr></thead><tbody>` +
+    rep.daily.map(d => {
+      const sa = d.A.spend || 0, sb = d.B.spend || 0, n = d.ledger_leads || 0;
+      return `<tr><td>${d.date}</td><td class="num">${fmt$(sa)}</td><td class="num">${fmt$(sb)}</td>
+        <td class="num">${n}</td><td class="num">${n ? fmt$(sa / n) : "–"}</td><td class="num">${d.B.lpv || 0}</td></tr>`;
+    }).join("") + `</tbody></table></div>`;
+
+  html += `<h2>Funnel by source</h2><div class="card tbl-scroll"><table><thead><tr>
+    <th>Source</th><th class="num">Leads</th><th class="num">Contacted</th><th class="num">Booked</th><th class="num">Ran</th><th class="num">No-show risk</th><th class="num">Won</th><th class="num">Revenue</th><th class="num">Spend</th><th class="num">CAC</th></tr></thead><tbody>` +
+    [["Instant forms (Camp A)", f.instant_form], ["Funnel page (Camp B)", f.funnel_page], ["Other / manual", f.other], ["TOTAL", f.total]].map(([label, r]) =>
+      `<tr><td>${label}</td><td class="num">${r.leads}</td><td class="num">${pct(r.contacted, r.leads)}</td>
+       <td class="num">${r.booked}</td><td class="num">${r.ran}</td><td class="num">${r.no_show_risk}</td>
+       <td class="num">${r.won}</td><td class="num">${fmt$(r.revenue)}</td><td class="num">${fmt$(r.spend)}</td>
+       <td class="num">${r.won ? fmt$(r.spend / r.won) : "–"}</td></tr>`).join("") + `</tbody></table></div>`;
+
+  html += `<h2>Every lead since relaunch</h2><div class="card tbl-scroll"><table><thead><tr>
+    <th>Lead</th><th>Source</th><th>Arrived (ET)</th><th class="num">First call (min)</th><th>Booked</th><th>Ran</th><th>Won</th></tr></thead><tbody>` +
+    rep.leads.map(l => {
+      const dt = new Date(l.created).toLocaleString("en-US", { timeZone: "America/New_York", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" });
+      return `<tr><td>${l.name || "(no name)"}</td><td class="src">${l.source.replace("_", " ")}</td><td>${dt}</td>
+        <td class="num">${l.first_call_min ?? "–"}</td><td>${l.booked ? "✓" : ""}</td><td>${l.ran ? "✓" : ""}</td><td>${l.won ? "✓ " + fmt$(l.revenue) : ""}</td></tr>`;
+    }).join("") + `</tbody></table></div>`;
+
+  document.getElementById("app").innerHTML = html;
+}
+
+async function load(refresh) {
+  document.getElementById("meta").textContent = refresh ? "recomputing from source…" : "loading…";
+  try {
+    const r = await fetch(`/dash/data?key=${encodeURIComponent(KEY)}${refresh ? "&refresh=1" : ""}`);
+    if (r.status === 401) { document.getElementById("app").innerHTML = '<div class="err">Bad or missing key.</div>'; return; }
+    const j = await r.json();
+    if (!j.report || j.report.error) { document.getElementById("app").innerHTML = `<div class="err">Collector error: ${(j.report || {}).error || "no data"}</div>`; return; }
+    render(j.report);
+    const gen = new Date(j.report.generated_at).toLocaleString("en-US", { timeZone: "America/New_York" });
+    document.getElementById("meta").textContent = `data computed ${gen} ET · refreshes daily 5:30am ET · stateless from systems of record`;
+  } catch (e) {
+    document.getElementById("app").innerHTML = `<div class="err">Load failed: ${e}</div>`;
+  }
+}
+document.getElementById("refresh").addEventListener("click", () => load(true));
+load(false);
+</script>
+</body>
+</html>
