@@ -3,8 +3,9 @@ import os, json, threading, time as _time, urllib.request, urllib.parse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import collector
+import janitor as janitor_mod
 
-DASH = {"data": None, "ts": 0.0, "lock": threading.Lock(), "running": False}
+DASH = {"data": None, "ts": 0.0, "lock": threading.Lock(), "running": False, "janitor": None}
 
 def _collect_now():
     with DASH["lock"]:
@@ -18,6 +19,14 @@ def _collect_now():
         DASH["data"] = {"error": str(e)[:300], "generated_at": datetime.now(timezone.utc).isoformat()}
     finally:
         DASH["running"] = False
+
+def _janitor_loop():
+    while True:
+        try:
+            DASH["janitor"] = janitor_mod.run()
+        except Exception as e:
+            DASH["janitor"] = {"error": str(e)[:200], "ran_at": datetime.now(timezone.utc).isoformat()}
+        _time.sleep(1800)
 
 def _daily_loop():
     _collect_now()
@@ -127,7 +136,7 @@ class H(BaseHTTPRequestHandler):
             if qs.get("refresh", ["0"])[0] == "1" or DASH["data"] is None:
                 _collect_now()
             self._send(200, {"ok": True, "stale_seconds": int(_time.time() - DASH["ts"]) if DASH["ts"] else None,
-                             "report": DASH["data"]})
+                             "janitor": DASH["janitor"], "report": DASH["data"]})
             return
         self._send(200, {"ok": True, "service": "cft-funnel-relay"})
     def do_POST(self):
@@ -142,4 +151,5 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=_daily_loop, daemon=True).start()
+    threading.Thread(target=_janitor_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), H).serve_forever()

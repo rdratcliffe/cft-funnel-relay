@@ -90,7 +90,7 @@ function spark(vals, w = 220, h = 44) {
   </svg>`;
 }
 
-function render(rep) {
+function render(rep, jan) {
   const f = rep.funnel, t = f.total;
   const cplDaily = rep.daily.map(d => {
     const s = (d.A.spend || 0), n = d.ledger_leads || 0;
@@ -103,6 +103,11 @@ function render(rep) {
     const [icon, color, label] = ST[a.level] || ST.warning;
     return `<div class="alarm"><span class="chip" style="color:${color}">${icon} ${label} · ${a.code}</span><span class="d">${a.detail}</span></div>`;
   }).join("") + `</div>`;
+
+  if (jan && !jan.error) {
+    const del = (jan.deleted_ghosts || []).length, tag = (jan.tagged_for_merge || []).length;
+    html += `<div class="meta" style="margin-top:8px">Dupe janitor (every 30 min): ${del} ghost row(s) auto-deleted, ${tag} data-bearing duplicate(s) tagged 'duplicate-merge-needed' for manual merge · last ran ${new Date(jan.ran_at).toLocaleTimeString("en-US", {timeZone:"America/New_York"})} ET</div>`;
+  }
 
   html += `<h2>Since relaunch (${rep.epoch})</h2><div class="tiles">
     <div class="tile"><div class="v">${t.leads}</div><div class="l">Leads (ledger + relay)</div></div>
@@ -161,7 +166,7 @@ async function load(refresh) {
     if (r.status === 401) { document.getElementById("app").innerHTML = '<div class="err">Bad or missing key.</div>'; return; }
     const j = await r.json();
     if (!j.report || j.report.error) { document.getElementById("app").innerHTML = `<div class="err">Collector error: ${(j.report || {}).error || "no data"}</div>`; return; }
-    render(j.report);
+    render(j.report, j.janitor);
     const gen = new Date(j.report.generated_at).toLocaleString("en-US", { timeZone: "America/New_York" });
     document.getElementById("meta").textContent = `data computed ${gen} ET · refreshes daily 5:30am ET · stateless from systems of record`;
   } catch (e) {
