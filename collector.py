@@ -99,15 +99,18 @@ def collect():
         contacts.extend(batch)
         start_after = batch[-1].get("id")
         if batch[-1].get("dateAdded", "9999")[:10] < EPOCH: break
+    seen_ids = set()
     leads = []
     for c in contacts:
+        if c.get("id") in seen_ids: continue
+        seen_ids.add(c.get("id"))
         if (c.get("dateAdded") or "")[:10] < EPOCH: continue
         tags = [t.lower() for t in (c.get("tags") or [])]
         src = (c.get("source") or "").lower()
         if "funnel-lead" in tags: source = "funnel_page"
         elif "facebook" in src or "facebook ads" in tags: source = "instant_form"
         else: source = "other"
-        leads.append({"id": c["id"], "name": f"{c.get('firstName','')} {c.get('lastName') or ''}".strip(),
+        leads.append({"id": c["id"], "name": (f"{c.get('firstName') or ''} {c.get('lastName') or ''}".strip() or "(no name)"),
                       "phone10": _phone10(c.get("phone")), "created": c.get("dateAdded"),
                       "source": source, "first_call_min": None, "booked": False, "ran": False,
                       "no_show_risk": False, "won": False, "revenue": 0.0})
@@ -198,6 +201,8 @@ def collect():
     # 5g. SLA breaches (business-hours leads)
     sla_breaches, sla_samples = 0, []
     for l in leads:
+        if l["source"] not in ("instant_form", "funnel_page"):
+            continue  # SLA covers ad-response leads; voice-AI/manual/synced contacts have their own flows
         t0 = datetime.fromisoformat(l["created"].replace("Z", "+00:00")).astimezone(ET)
         in_biz = BIZ_START <= t0.hour < BIZ_END
         if l["first_call_min"] is not None:
