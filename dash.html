@@ -134,6 +134,12 @@ function render(rep, jan) {
        <td class="num">${r.booked}</td><td class="num">${r.won}</td><td class="num">${fmt$(r.revenue)}</td><td class="num">${fmt$(r.spend)}</td>
        <td class="num">${r.won ? fmt$(r.spend / r.won) : "–"}</td></tr>`).join("") + `</tbody></table></div>`;
 
+  html += `<h2>Ad intelligence — trailing 7 days vs Maly Golden Thresholds (CTR ≥1.5%, CPL ≤$30)</h2><div class="card tbl-scroll"><table><thead><tr>
+    <th>Ad</th><th class="num">Spend 7d</th><th class="num">CTR</th><th class="num">Leads</th><th class="num">CPL</th><th>Verdict</th></tr></thead><tbody>` +
+    (rep.ad_intel || []).map(a =>
+      `<tr><td>${a.ad}</td><td class="num">${fmt$(a.spend7d)}</td><td class="num">${a.ctr7d}%</td>
+       <td class="num">${a.leads7d}</td><td class="num">${a.cpl7d ? fmt$(a.cpl7d) : "–"}</td><td class="src">${a.verdict}</td></tr>`).join("") + `</tbody></table></div>`;
+
   html += `<h2>Estimates this period (HCP calendar — booked & lifecycle)</h2><div class="card tbl-scroll"><table><thead><tr>
     <th>#</th><th>Customer</th><th>Lead source</th><th>Scheduled for</th><th>Status</th><th>Ad lead</th></tr></thead><tbody>` +
     rep.estimates.map(e => {

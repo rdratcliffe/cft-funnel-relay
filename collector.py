@@ -214,6 +214,27 @@ def collect():
             l["won"] = True
             l["revenue"] += amt
 
+    # ---- 5b. AD INTELLIGENCE: trailing-7d per-ad + Maly Golden Threshold verdicts ----
+    week_ago = (now.astimezone(ET) - timedelta(days=7)).strftime("%Y-%m-%d")
+    ad7 = _safe(lambda: _get(f"{FB}/act_506325703451497/insights?" + urllib.parse.urlencode({
+        "level": "ad", "time_range": json.dumps({"since": week_ago, "until": today}),
+        "fields": "ad_id,ad_name,spend,impressions,ctr", "limit": 100, "access_token": fb_tok})), {"data": []})
+    ledger_by_ad = {}
+    for l in ledger:
+        ledger_by_ad[l["ad"]] = ledger_by_ad.get(l["ad"], 0) + 1
+    ad_intel = []
+    for r in ad7.get("data", []):
+        sp = float(r.get("spend", 0)); ctr = float(r.get("ctr", 0))
+        nm = r.get("ad_name", "?"); n = ledger_by_ad.get(nm, 0)
+        cpl = sp / n if n else None
+        if sp < 30: verdict = "LEARNING"
+        elif cpl is not None and cpl <= 30 and ctr >= 1.5: verdict = "SCALE-worthy"
+        elif (cpl is not None and cpl > 50 and sp >= 75) or (n == 0 and sp >= 60): verdict = "CUT-candidate"
+        else: verdict = "WATCH"
+        ad_intel.append({"ad": nm, "spend7d": round(sp, 2), "ctr7d": round(ctr, 2),
+                         "leads7d": n, "cpl7d": round(cpl, 2) if cpl else None, "verdict": verdict})
+    ad_intel.sort(key=lambda a: -a["spend7d"])
+
     # ---- 6. Watchdog ----
     ghl_if_by_day = {}
     for l in leads:
@@ -237,8 +258,11 @@ def collect():
     spent_ids = {r.get("ad_id") for r in ad_ins.get("data", []) if float(r.get("spend", 0)) > 0}
     for ad_id, expected_cr in AD_ROSTER.items():
         st = _safe(lambda: _get(f"{FB}/{ad_id}?fields=effective_status,creative{{id}}&access_token={fb_tok}"), {})
-        if st.get("effective_status") == "ACTIVE" and ad_id not in spent_ids and daily.get(yday):
-            alarm("warning", "AD_STALLED", f"ad {ad_id} ACTIVE but $0 spend on {yday}")
+        spent_today = {r.get("ad_id") for r in _safe(lambda: _get(f"{FB}/act_506325703451497/insights?" + urllib.parse.urlencode({
+            "level": "ad", "time_range": json.dumps({"since": today, "until": today}),
+            "fields": "ad_id,spend", "limit": 100, "access_token": fb_tok})), {"data": []}).get("data", []) if float(r.get("spend", 0)) > 0}
+        if st.get("effective_status") == "ACTIVE" and ad_id not in spent_ids and ad_id not in spent_today and daily.get(yday):
+            alarm("warning", "AD_STALLED", f"ad {ad_id} ACTIVE, $0 on {yday} AND $0 so far today — genuinely stalled")
         cr = (st.get("creative") or {}).get("id")
         if cr and cr != expected_cr:
             alarm("warning", "SCHEMA_DRIFT", f"ad {ad_id} creative changed to {cr} (expected {expected_cr})")
@@ -261,6 +285,20 @@ def collect():
         elif in_biz and (now - t0.astimezone(timezone.utc)).total_seconds() > 7200:
             sla_breaches += 1
             alarm("serious", "SLA_BREACH", f"{l['name']} ({l['source']}) uncalled for >2h")
+    hr_now = now.astimezone(ET).hour
+    if BIZ_START + 3 <= hr_now < BIZ_END:
+        hourly = _safe(lambda: _get(f"{FB}/act_506325703451497/insights?" + urllib.parse.urlencode({
+            "level": "account", "breakdowns": "hourly_stats_aggregated_by_advertiser_time_zone",
+            "fields": "impressions", "time_range": json.dumps({"since": today, "until": today}),
+            "access_token": fb_tok})), {"data": []})
+        by_hr = {}
+        for row in hourly.get("data", []):
+            try: by_hr[int(row["hourly_stats_aggregated_by_advertiser_time_zone"][:2])] = int(row.get("impressions", 0))
+            except Exception: pass
+        recent = sum(by_hr.get(h, 0) for h in (hr_now - 1, hr_now - 2))
+        earlier = [by_hr.get(h, 0) for h in range(BIZ_START, hr_now - 2)]
+        if earlier and (sum(earlier) / len(earlier)) > 100 and recent < 40:
+            alarm("serious", "INTRADAY_STALL", f"last 2 hours ~{recent} impressions vs earlier avg {int(sum(earlier)/len(earlier))}/hr — delivery stopped mid-day")
     try:
         page_html = urllib.request.urlopen("https://go.centralfloridatrimlight.com/", timeout=20).read().decode()
         if "What are you interested in having done?" not in page_html:
@@ -311,6 +349,7 @@ def collect():
         "funnel": funnel,
         "estimates": sorted(est_rows, key=lambda r: r["created"] or "", reverse=True),
         "jobs": sorted(job_rows, key=lambda r: r["created"] or "", reverse=True),
+        "ad_intel": ad_intel,
         "jobs_summary": {"count": len(job_rows), "revenue": round(sum(r["amount"] for r in job_rows), 2),
                          "converted_estimates": sum(1 for r in est_rows if r["converted"])},
         "sla": {"median_min": sla_samples[len(sla_samples)//2] if sla_samples else None,
