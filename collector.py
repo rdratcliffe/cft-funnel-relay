@@ -12,6 +12,7 @@ stdlib only. Stateless recompute."""
 import os, json, urllib.request, urllib.parse
 from datetime import datetime, timedelta, timezone
 
+SIGNAL_CONTRACT_VERSION = "1.0.0"   # bump ONLY with a matching edit to vault 09-Systems/Signal Contract.md
 EPOCH = "2026-08-10"
 HCP_KILL_UTC = "2026-08-12T18:00:00Z"
 ET = timezone(timedelta(hours=-4))        # America/New_York (DST); revisit at Nov clock change
@@ -266,6 +267,24 @@ def collect():
             alarm("critical", "INFRA_DOWN", "funnel page serving but canonical form marker missing")
     except Exception as e:
         alarm("critical", "INFRA_DOWN", f"funnel page unreachable: {str(e)[:80]}")
+    # ---- SIGNAL INTEGRITY (deterministic node lock): verify each node's shape; alarm, never guess ----
+    integrity = []
+    if not ins.get("data"): integrity.append("meta-insights returned no rows")
+    if jobs and not all(isinstance(j.get("total_amount"), int) for j in jobs[:5]):
+        integrity.append("hcp job total_amount no longer integer cents")
+    if any(_dollars(j.get("total_amount")) > 100000 for j in jobs):
+        integrity.append("hcp job amount > $100k — unit assumption (cents) may have changed")
+    if estimates and not all("work_status" in e for e in estimates[:5]):
+        integrity.append("hcp estimate work_status field missing")
+    known_ws = {"scheduled", "created job from estimate", "unscheduled", "pro canceled", "user canceled",
+                "complete", "in progress", "needs scheduling", "complete rated", "complete unrated", "on my way", "started"}
+    novel = {(e.get("work_status") or "").lower() for e in estimates if (e.get("work_status") or "").lower() not in known_ws}
+    if novel: integrity.append(f"novel estimate work_status values (extend contract): {sorted(novel)[:4]}")
+    if rows and not all(c.get("dateAdded") for c in rows[:5]):
+        integrity.append("ghl contact dateAdded missing")
+    if len(contacts) >= 1000: integrity.append("ghl pagination hit cap — cohort may be truncated")
+    for msg in integrity:
+        alarm("critical", "SIGNAL_INTEGRITY", msg)
     if not alarms:
         alarm("good", "ALL_CLEAR", "every watchdog check passed")
 
@@ -284,7 +303,7 @@ def collect():
               "total": funnel_row(leads) | {"spend": round(spend_a + spend_b, 2)}}
     sla_samples.sort()
     return {
-        "generated_at": now.isoformat(), "epoch": EPOCH,
+        "generated_at": now.isoformat(), "epoch": EPOCH, "contract_version": SIGNAL_CONTRACT_VERSION,
         "daily": [{"date": d,
                    "A": {k: round(v, 2) if isinstance(v, float) else v for k, v in daily[d].get("A", {}).items()},
                    "B": {k: round(v, 2) if isinstance(v, float) else v for k, v in daily[d].get("B", {}).items()},
