@@ -171,7 +171,8 @@ footer.site b{color:#fff;font-family:var(--font-display)}
       <div class="cta-note">Takes 30 seconds. A real person calls you back within minutes during business hours.</div>
     </div>
     <div class="vid">
-      <video id="herovid" autoplay muted loop playsinline poster="">
+      <video id="herovid" autoplay muted loop playsinline poster="https://cft-go.nyc3.digitaloceanspaces.com/lee-poster.jpg">
+        <source src="https://cft-go.nyc3.digitaloceanspaces.com/lee-testimonial-720.mp4" type="video/mp4">
         <source src="https://assets.cdn.filesafe.space/lUzoEFnWSKc9xwMrYJE8/media/cbd4a231-91d7-4ac5-b424-3e4f0a3372e3.mp4" type="video/mp4">
       </video>
       <div class="tag">✦ Real install · Tampa, FL</div>
@@ -248,9 +249,10 @@ footer.site b{color:#fff;font-family:var(--font-display)}
           </div>
           <input type="hidden" name="utm_source"><input type="hidden" name="utm_medium"><input type="hidden" name="utm_campaign"><input type="hidden" name="utm_content"><input type="hidden" name="page_source" value="go.centralfloridatrimlight.com">
           <label class="consent"><input type="checkbox" name="sms_consent" value="yes">
-            <span>Yes, text me about my estimate and install. Message and data rates may apply. Reply STOP anytime to opt out. We never sell your information.</span>
+            <span>Yes, text me about my estimate and install. Message and data rates may apply. Reply STOP anytime to opt out. We never sell your information. <a href="https://centralfloridatrimlight.com/privacy-policy" target="_blank" rel="noopener" style="color:inherit">Privacy Policy</a></span>
           </label>
           <button class="cta" type="submit">Book My Free Demo</button>
+          <p id="formerr" style="display:none;text-align:center;font-size:.85rem;color:var(--magenta);font-weight:600">Something hiccuped and your request did not go through. Please try again, or call us at <a href="tel:+18632926551" style="color:inherit">(863) 292-6551</a> and we will take care of you the old-fashioned way.</p>
           <p class="fine">No obligation. If your HOA says no, you pay nothing. That is our promise in writing.</p>
         </form>
       </div>
@@ -265,7 +267,7 @@ footer.site b{color:#fff;font-family:var(--font-display)}
 <footer class="site">
   <b>Life is Brighter with Trimlight</b><br>
   Central Florida Trimlight · Lets Hang Your Lights, LLC · Serving St. Pete to Kissimmee, about 90 minutes in every direction of Lakeland<br>
-  Lifetime parts warranty · One-year labor guarantee · Licensed and insured
+  Lifetime parts warranty · One-year labor guarantee · Licensed and insured · <a href="https://centralfloridatrimlight.com/privacy-policy" target="_blank" rel="noopener" style="color:#9aa1c9">Privacy Policy</a>
 </footer>
 
 <script>
@@ -284,16 +286,18 @@ const FORM_ENDPOINT = "https://cft-funnel-relay-e23ha.ondigitalocean.app/funnel/
 document.getElementById("leadform").addEventListener("submit", async (e)=>{
   e.preventDefault();
   const f = e.target, data = Object.fromEntries(new FormData(f).entries());
+  const btn = f.querySelector("button.cta"), err = document.getElementById("formerr");
+  btn.disabled = true; btn.textContent = "Sending..."; err.style.display = "none";
   try{
-    if(FORM_ENDPOINT.startsWith("http")){
-      await fetch(FORM_ENDPOINT,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
-    }
+    const res = await fetch(FORM_ENDPOINT,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
+    if(!res.ok) throw new Error("relay rejected: " + res.status);
     fbq('track','Lead');
     document.getElementById("formview").style.display="none";
     document.getElementById("thanksview").style.display="block";
     window.scrollTo({top:document.getElementById("book").offsetTop-40,behavior:"smooth"});
-  }catch(err){
-    alert("Something hiccuped. Please call us and we will take care of you the old-fashioned way.");
+  }catch(errCaught){
+    err.style.display = "block";
+    btn.disabled = false; btn.textContent = "Book My Free Demo";
   }
 });
 </script>
