@@ -108,8 +108,8 @@ function render(rep) {
     <div class="tile"><div class="v">${t.leads}</div><div class="l">Leads (ledger + relay)</div></div>
     <div class="tile"><div class="v">${fmt$(blendedCPL)}</div><div class="l">Blended CPL</div><div class="s">${fmt$(t.spend)} spend</div></div>
     <div class="tile"><div class="v">${pct(t.contacted, t.leads)}</div><div class="l">Contacted (real calls)</div></div>
-    <div class="tile"><div class="v">${t.booked}</div><div class="l">Estimates booked (HCP)</div></div>
-    <div class="tile"><div class="v">${t.won}</div><div class="l">Won (HCP jobs)</div><div class="s">${fmt$(t.revenue)} revenue</div></div>
+    <div class="tile"><div class="v">${rep.estimates.length}</div><div class="l">Estimates created (HCP)</div><div class="s">${rep.jobs_summary.converted_estimates} converted</div></div>
+    <div class="tile"><div class="v">${rep.jobs_summary.count}</div><div class="l">Jobs won (all sources)</div><div class="s">${fmt$(rep.jobs_summary.revenue)} revenue</div></div>
     <div class="tile"><div class="v">${rep.sla.median_min ?? "–"}<span style="font-size:.9rem"> min</span></div><div class="l">Median speed-to-lead</div><div class="s">${rep.sla.breaches} breach(es)</div></div>
   </div>`;
 
@@ -122,20 +122,33 @@ function render(rep) {
         <td class="num">${n}</td><td class="num">${n ? fmt$(sa / n) : "–"}</td><td class="num">${d.B.lpv || 0}</td></tr>`;
     }).join("") + `</tbody></table></div>`;
 
-  html += `<h2>Funnel by source</h2><div class="card tbl-scroll"><table><thead><tr>
-    <th>Source</th><th class="num">Leads</th><th class="num">Contacted</th><th class="num">Booked</th><th class="num">Ran</th><th class="num">No-show risk</th><th class="num">Won</th><th class="num">Revenue</th><th class="num">Spend</th><th class="num">CAC</th></tr></thead><tbody>` +
+  html += `<h2>Funnel by source (ad-lead cohort since ${rep.epoch})</h2><div class="card tbl-scroll"><table><thead><tr>
+    <th>Source</th><th class="num">Leads</th><th class="num">Contacted</th><th class="num">Booked</th><th class="num">Won</th><th class="num">Revenue</th><th class="num">Spend</th><th class="num">CAC</th></tr></thead><tbody>` +
     [["Instant forms (Camp A)", f.instant_form], ["Funnel page (Camp B)", f.funnel_page], ["Other / manual", f.other], ["TOTAL", f.total]].map(([label, r]) =>
       `<tr><td>${label}</td><td class="num">${r.leads}</td><td class="num">${pct(r.contacted, r.leads)}</td>
-       <td class="num">${r.booked}</td><td class="num">${r.ran}</td><td class="num">${r.no_show_risk}</td>
-       <td class="num">${r.won}</td><td class="num">${fmt$(r.revenue)}</td><td class="num">${fmt$(r.spend)}</td>
+       <td class="num">${r.booked}</td><td class="num">${r.won}</td><td class="num">${fmt$(r.revenue)}</td><td class="num">${fmt$(r.spend)}</td>
        <td class="num">${r.won ? fmt$(r.spend / r.won) : "–"}</td></tr>`).join("") + `</tbody></table></div>`;
 
-  html += `<h2>Every lead since relaunch</h2><div class="card tbl-scroll"><table><thead><tr>
-    <th>Lead</th><th>Source</th><th>Arrived (ET)</th><th class="num">First call (min)</th><th>Booked</th><th>Ran</th><th>Won</th></tr></thead><tbody>` +
+  html += `<h2>Estimates this period (HCP calendar — booked & lifecycle)</h2><div class="card tbl-scroll"><table><thead><tr>
+    <th>#</th><th>Customer</th><th>Lead source</th><th>Scheduled for</th><th>Status</th><th>Ad lead</th></tr></thead><tbody>` +
+    rep.estimates.map(e => {
+      const s = e.scheduled_start ? new Date(e.scheduled_start).toLocaleString("en-US", { timeZone: "America/New_York", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }) : "–";
+      const st = e.converted ? "✓ converted to job" : (e.no_show_risk ? "⚠ past date, still scheduled" : e.work_status);
+      return `<tr><td>${e.number || ""}</td><td>${e.customer}</td><td class="src">${e.lead_source || "–"}</td><td>${s}</td><td>${st}</td><td>${e.ad_lead ? "✓" : ""}</td></tr>`;
+    }).join("") + `</tbody></table></div>`;
+
+  html += `<h2>Jobs won this period (all sources, canceled excluded — HCP, amounts verified cents→$)</h2><div class="card tbl-scroll"><table><thead><tr>
+    <th>Invoice</th><th>Customer</th><th>Lead source</th><th>Status</th><th class="num">Amount</th><th class="num">Outstanding</th><th>Ad lead</th></tr></thead><tbody>` +
+    rep.jobs.map(j =>
+      `<tr><td>${j.invoice || ""}</td><td>${j.customer}</td><td class="src">${j.lead_source || "–"}</td><td>${j.work_status}</td>
+       <td class="num">${fmt$(j.amount)}</td><td class="num">${fmt$(j.outstanding)}</td><td>${j.ad_lead ? "✓" : ""}</td></tr>`).join("") + `</tbody></table></div>`;
+
+  html += `<h2>Every lead entity since relaunch (person-resolved; ${rep.unnamed_inbound.length} unnamed touch artifacts excluded)</h2><div class="card tbl-scroll"><table><thead><tr>
+    <th>Lead</th><th>Source</th><th>Arrived (ET)</th><th class="num">First call (min)</th><th>Booked</th><th>Estimate status</th><th>Won</th></tr></thead><tbody>` +
     rep.leads.map(l => {
       const dt = new Date(l.created).toLocaleString("en-US", { timeZone: "America/New_York", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" });
-      return `<tr><td>${l.name || "(no name)"}</td><td class="src">${l.source.replace("_", " ")}</td><td>${dt}</td>
-        <td class="num">${l.first_call_min ?? "–"}</td><td>${l.booked ? "✓" : ""}</td><td>${l.ran ? "✓" : ""}</td><td>${l.won ? "✓ " + fmt$(l.revenue) : ""}</td></tr>`;
+      return `<tr><td>${l.name}</td><td class="src">${l.source.replace("_", " ")}</td><td>${dt}</td>
+        <td class="num">${l.first_call_min ?? "–"}</td><td>${l.booked ? "✓" : ""}</td><td class="src">${l.est_status || ""}</td><td>${l.won ? "✓ " + fmt$(l.revenue) : ""}</td></tr>`;
     }).join("") + `</tbody></table></div>`;
 
   document.getElementById("app").innerHTML = html;
