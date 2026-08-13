@@ -87,17 +87,19 @@ def _alert(alarms):
     body = "CFT Funnel Watchdog:\n\n" + "\n".join(f"[{a['level'].upper()}] {a['code']}: {a['detail']}" for a in lines) \
            + "\n\nDashboard: https://go.centralfloridatrimlight.com/dash (key in vault)"
     payload = {"personalizations": [{"to": [{"email": to}]}],
-               "from": {"email": "office@mail.centralfloridatrimlight.com", "name": "CFT Funnel Watchdog"},
+               "from": {"email": os.environ.get("ALERT_FROM", "robby@centralfloridatrimlight.com"), "name": "CFT Funnel Watchdog"},
                "subject": f"Funnel alarm: {sorted(a['code'] for a in lines)[0]}" + (f" +{len(lines)-1} more" if len(lines) > 1 else ""),
                "content": [{"type": "text/plain", "value": body}]}
     try:
         req = urllib.request.Request("https://api.sendgrid.com/v3/mail/send",
                                      data=json.dumps(payload).encode(),
                                      headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=30)
+        r = urllib.request.urlopen(req, timeout=30)
         DASH["alerted"] = hot
-    except Exception:
-        pass
+        DASH["alert_status"] = {"ok": True, "http": r.status, "at": datetime.now(timezone.utc).isoformat(), "alarms": len(new)}
+    except Exception as e:
+        # NEVER silent: surface on the dashboard payload; the collector run also re-alerts next pass
+        DASH["alert_status"] = {"ok": False, "error": str(e)[:200], "at": datetime.now(timezone.utc).isoformat()}
 
 def _collect_now():
     with DASH["lock"]:
@@ -307,7 +309,7 @@ class H(BaseHTTPRequestHandler):
             if qs.get("refresh", ["0"])[0] == "1" or DASH["data"] is None:
                 _collect_now()
             self._send(200, {"ok": True, "stale_seconds": int(_time.time() - DASH["ts"]) if DASH["ts"] else None,
-                             "janitor": DASH["janitor"], "drip": DASH["drip"], "reconciler": DASH.get("reconciler"), "report": DASH["data"]})
+                             "janitor": DASH["janitor"], "drip": DASH["drip"], "reconciler": DASH.get("reconciler"), "alert_status": DASH.get("alert_status"), "report": DASH["data"]})
             return
         self._send(200, {"ok": True, "service": "cft-funnel-relay"})
     def do_POST(self):
