@@ -113,6 +113,76 @@ def _collect_now():
     finally:
         DASH["running"] = False
 
+def _reconcile_ledger():
+    """Safety net for MAPPING_BROKEN: any Meta form submission missing from GHL gets pushed in
+    (canonical fields + note + opportunity + CALL task, tagged recovered-lead)."""
+    import urllib.parse as _up
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    fb_tok = os.environ.get("FACEBOOK_ACCESS_TOKEN")
+    if not fb_tok:
+        return {"error": "no fb token"}
+    loc = os.environ["GHL_LOCATION"]
+    since = (_dt.now(_tz.utc) - _td(days=3)).strftime("%Y-%m-%d")
+    def _p10(p):
+        d = "".join(c for c in str(p or "") if c.isdigit()); return d[-10:] if len(d) >= 10 else d
+    ledger = []
+    for form in ("6684499951617295", "1058930670198812", "2250569802393579"):
+        try:
+            d = json.loads(urllib.request.urlopen(
+                f"https://graph.facebook.com/v21.0/{form}/leads?fields=created_time,ad_name,field_data&limit=50&access_token={fb_tok}",
+                timeout=45).read())
+        except Exception:
+            continue
+        for l in d.get("data", []):
+            if l["created_time"][:10] >= since:
+                fd = {f["name"]: f.get("values", [""])[0] for f in l.get("field_data", [])}
+                ledger.append({"created": l["created_time"], "ad": l.get("ad_name"), **fd})
+    phones = set()
+    sa = None
+    for _ in range(5):
+        q = {"locationId": loc, "limit": 100}
+        if sa: q["startAfterId"] = sa
+        try:
+            page = json.loads(urllib.request.urlopen(urllib.request.Request(
+                GHL + "/contacts/?" + _up.urlencode(q),
+                headers={"Authorization": "Bearer " + os.environ["GHL_KEY"], "Version": "2021-07-28",
+                         "User-Agent": "cft-funnel-relay/1.0"}), timeout=45).read())
+        except Exception:
+            break
+        batch = page.get("contacts", [])
+        if not batch: break
+        phones |= {_p10(c.get("phone")) for c in batch}
+        sa = batch[-1].get("id")
+        if batch[-1].get("dateAdded", "9999")[:10] < since: break
+    recovered = []
+    for l in ledger:
+        ph = _p10(l.get("phone_number"))
+        if not ph or ph in phones: continue
+        name = (l.get("full_name") or "").split(" ", 1)
+        first, last = name[0] or "Lead", (name[1] if len(name) > 1 else "")
+        interest = l.get("what_are_you_lighting") or "not specified"
+        try:
+            c = ghl("/contacts/upsert", {"locationId": loc, "firstName": first, "lastName": last,
+                    "phone": "+1" + ph, "email": l.get("email") or None,
+                    "address1": l.get("street_address") or "", "city": l.get("city") or "",
+                    "postalCode": l.get("zip_code") or "",
+                    "tags": ["facebook ads", "recovered-lead"], "source": "Facebook Ads"})
+            cid = c["contact"]["id"]
+            note = f"AUTO-RECOVERED (form->GHL sync gap)\nAd: {l.get('ad')}\nSubmitted: {l['created']}\nInterest: {interest}"
+            for fn in (lambda: ghl("/contacts/" + cid + "/notes", {"body": note}),
+                       lambda: ghl("/opportunities/", {"locationId": loc, "pipelineId": os.environ["PIPELINE_ID"],
+                            "pipelineStageId": os.environ["STAGE_ID"], "contactId": cid, "status": "open",
+                            "name": (first + " " + last).strip() + " - " + interest}),
+                       lambda: ghl("/contacts/" + cid + "/tasks", {"title": "CALL RECOVERED LEAD NOW: " + first + " +1" + ph,
+                            "body": note, "dueDate": "2099-01-01T00:00:00Z", "completed": False})):
+                try: fn()
+                except Exception: pass
+            phones.add(ph)
+            recovered.append({"name": (first + " " + last).strip(), "submitted": l["created"]})
+        except Exception as e:
+            recovered.append({"error": str(e)[:80]})
+    return {"recovered": recovered, "ledger_checked": len(ledger)}
+
 def _janitor_loop():
     while True:
         try:
@@ -123,6 +193,10 @@ def _janitor_loop():
             DASH["drip"] = _drip_pass()
         except Exception as e:
             DASH["drip"] = {"error": str(e)[:200]}
+        try:
+            DASH["reconciler"] = _reconcile_ledger()
+        except Exception as e:
+            DASH["reconciler"] = {"error": str(e)[:200]}
         _time.sleep(1800)
 
 def _daily_loop():
@@ -233,7 +307,7 @@ class H(BaseHTTPRequestHandler):
             if qs.get("refresh", ["0"])[0] == "1" or DASH["data"] is None:
                 _collect_now()
             self._send(200, {"ok": True, "stale_seconds": int(_time.time() - DASH["ts"]) if DASH["ts"] else None,
-                             "janitor": DASH["janitor"], "drip": DASH["drip"], "report": DASH["data"]})
+                             "janitor": DASH["janitor"], "drip": DASH["drip"], "reconciler": DASH.get("reconciler"), "report": DASH["data"]})
             return
         self._send(200, {"ok": True, "service": "cft-funnel-relay"})
     def do_POST(self):
