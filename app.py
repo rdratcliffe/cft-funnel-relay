@@ -59,6 +59,8 @@ def _drip_pass():
             if age_days >= step["day"] and step["tag"] not in tags:
                 msg = os.environ.get("DRIP_MSG_" + step["tag"][-1], "")
                 if not msg: break
+                first = (c.get("firstName") or "").strip().title()
+                msg = msg.replace("{name}", first) if first else msg.replace(" {name}", "").replace("{name}", "")
                 try:
                     ghl("/conversations/messages", {"type": "SMS", "contactId": c["id"], "message": msg})
                     ghl("/contacts/" + c["id"] + "/tags", {"tags": [step["tag"]]})
