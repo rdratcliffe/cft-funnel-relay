@@ -5,7 +5,71 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import collector
 import janitor as janitor_mod
 
-DASH = {"data": None, "ts": 0.0, "lock": threading.Lock(), "running": False, "janitor": None}
+# ---- Lead-only nurture drip (GHL SMS; PRIVATE channel — no Meta Ad Library exposure) ----
+# ENABLED only when env DRIP_ENABLED=true (operator gate: copy approved 1:1 before enable).
+# Eligibility: ad-sourced leads (funnel-lead / facebook ads tag), created after DRIP_START,
+# no 'no-sms' tag. Steps tracked as GHL tags (stateless). Sends only 9am-7pm ET.
+DRIP_STEPS = [
+    {"day": 1, "tag": "drip-lls-1", "msg": "MSG1"},
+    {"day": 2, "tag": "drip-lls-2", "msg": "MSG2"},
+    {"day": 4, "tag": "drip-lls-3", "msg": "MSG3"},
+    {"day": 6, "tag": "drip-lls-4", "msg": "MSG4"},
+    {"day": 8, "tag": "drip-lls-5", "msg": "MSG5"},
+]
+DRIP_MSGS = {}  # filled from env DRIP_MSG_1..5 so copy changes never need a code deploy
+
+def _drip_pass():
+    import urllib.parse as _up
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    if (os.environ.get("DRIP_ENABLED") or "").lower() != "true":
+        return {"enabled": False}
+    ET = _tz(_td(hours=-4))
+    now = _dt.now(_tz.utc)
+    if not (9 <= now.astimezone(ET).hour < 19):
+        return {"enabled": True, "skipped": "outside send window"}
+    start = os.environ.get("DRIP_START", "2026-08-13")
+    loc = os.environ["GHL_LOCATION"]
+    sent, errors = [], []
+    contacts, sa = [], None
+    for _ in range(6):
+        q = {"locationId": loc, "limit": 100}
+        if sa: q["startAfterId"] = sa
+        try:
+            page = json.loads(urllib.request.urlopen(urllib.request.Request(
+                GHL + "/contacts/?" + _up.urlencode(q),
+                headers={"Authorization": "Bearer " + os.environ["GHL_KEY"], "Version": "2021-07-28",
+                         "User-Agent": "cft-funnel-relay/1.0"}), timeout=45).read())
+        except Exception:
+            break
+        batch = page.get("contacts", [])
+        if not batch: break
+        contacts.extend(batch); sa = batch[-1].get("id")
+        if batch[-1].get("dateAdded", "9999")[:10] < start: break
+    for c in contacts:
+        added = c.get("dateAdded") or ""
+        if added[:10] < start: continue
+        tags = [t.lower() for t in (c.get("tags") or [])]
+        if "no-sms" in tags or "duplicate-merge-needed" in tags: continue
+        if not ("funnel-lead" in tags or "facebook ads" in tags): continue
+        try:
+            age_days = (now - _dt.fromisoformat(added.replace("Z", "+00:00"))).total_seconds() / 86400
+        except Exception:
+            continue
+        for step in DRIP_STEPS:
+            if age_days >= step["day"] and step["tag"] not in tags:
+                msg = os.environ.get("DRIP_MSG_" + step["tag"][-1], "")
+                if not msg: break
+                try:
+                    ghl("/conversations/messages", {"type": "SMS", "contactId": c["id"], "message": msg})
+                    ghl("/contacts/" + c["id"] + "/tags", {"tags": [step["tag"]]})
+                    sent.append({"contact": c["id"], "step": step["tag"]})
+                except Exception as e:
+                    errors.append({"contact": c["id"], "err": str(e)[:100]})
+                break  # max one step per contact per pass (spacing guarantee)
+    return {"enabled": True, "sent": sent, "errors": errors, "ran_at": now.isoformat()}
+
+
+DASH = {"data": None, "ts": 0.0, "lock": threading.Lock(), "running": False, "janitor": None, "drip": None}
 
 def _collect_now():
     with DASH["lock"]:
@@ -26,6 +90,10 @@ def _janitor_loop():
             DASH["janitor"] = janitor_mod.run()
         except Exception as e:
             DASH["janitor"] = {"error": str(e)[:200], "ran_at": datetime.now(timezone.utc).isoformat()}
+        try:
+            DASH["drip"] = _drip_pass()
+        except Exception as e:
+            DASH["drip"] = {"error": str(e)[:200]}
         _time.sleep(1800)
 
 def _daily_loop():
@@ -136,7 +204,7 @@ class H(BaseHTTPRequestHandler):
             if qs.get("refresh", ["0"])[0] == "1" or DASH["data"] is None:
                 _collect_now()
             self._send(200, {"ok": True, "stale_seconds": int(_time.time() - DASH["ts"]) if DASH["ts"] else None,
-                             "janitor": DASH["janitor"], "report": DASH["data"]})
+                             "janitor": DASH["janitor"], "drip": DASH["drip"], "report": DASH["data"]})
             return
         self._send(200, {"ok": True, "service": "cft-funnel-relay"})
     def do_POST(self):
