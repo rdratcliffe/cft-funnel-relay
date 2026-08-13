@@ -71,7 +71,33 @@ def _drip_pass():
     return {"enabled": True, "sent": sent, "errors": errors, "ran_at": now.isoformat()}
 
 
-DASH = {"data": None, "ts": 0.0, "lock": threading.Lock(), "running": False, "janitor": None, "drip": None}
+DASH = {"data": None, "ts": 0.0, "lock": threading.Lock(), "running": False, "janitor": None, "drip": None, "alerted": set()}
+
+def _alert(alarms):
+    """Email the operator on NEW critical/serious alarms (dashboard is pull; this is the push)."""
+    key = os.environ.get("SENDGRID_API_KEY"); to = os.environ.get("ALERT_EMAIL")
+    if not key or not to:
+        return
+    hot = {f"{a['code']}|{a['detail'][:60]}" for a in alarms if a.get("level") in ("critical", "serious")}
+    new = hot - DASH.get("alerted", set())
+    if not new:
+        DASH["alerted"] = hot
+        return
+    lines = [a for a in alarms if a.get("level") in ("critical", "serious")]
+    body = "CFT Funnel Watchdog:\n\n" + "\n".join(f"[{a['level'].upper()}] {a['code']}: {a['detail']}" for a in lines) \
+           + "\n\nDashboard: https://go.centralfloridatrimlight.com/dash (key in vault)"
+    payload = {"personalizations": [{"to": [{"email": to}]}],
+               "from": {"email": "office@mail.centralfloridatrimlight.com", "name": "CFT Funnel Watchdog"},
+               "subject": f"Funnel alarm: {sorted(a['code'] for a in lines)[0]}" + (f" +{len(lines)-1} more" if len(lines) > 1 else ""),
+               "content": [{"type": "text/plain", "value": body}]}
+    try:
+        req = urllib.request.Request("https://api.sendgrid.com/v3/mail/send",
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=30)
+        DASH["alerted"] = hot
+    except Exception:
+        pass
 
 def _collect_now():
     with DASH["lock"]:
@@ -81,6 +107,7 @@ def _collect_now():
     try:
         DASH["data"] = collector.collect()
         DASH["ts"] = _time.time()
+        _alert(DASH["data"].get("alarms") or [])
     except Exception as e:
         DASH["data"] = {"error": str(e)[:300], "generated_at": datetime.now(timezone.utc).isoformat()}
     finally:
