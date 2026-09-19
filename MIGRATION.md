@@ -12,7 +12,8 @@ session that built this is required for it to keep running.
 | Lead nurture drip (_drip_pass) | env-gated, copy in DRIP_MSG_1..5 | Move to DealerOS scheduler or keep; GHL tags are the state, so it's restart/migrate-safe |
 
 Config = env vars only: GHL_KEY, GHL_LOCATION, PIPELINE_ID, STAGE_ID, FACEBOOK_ACCESS_TOKEN,
-HCP_API_KEY, DASH_KEY, SENDGRID_API_KEY, ALERT_EMAIL, DRIP_ENABLED, DRIP_START, DRIP_MSG_1..5.
+HCP_API_KEY, DASH_KEY, SENDGRID_API_KEY, ALERT_EMAIL, DRIP_ENABLED, DRIP_START, DRIP_MSG_1..5,
+DRIP_DRY_RUN (true = log would-send, send nothing; for verifying a pass before enabling).
 Deploys do NOT auto-trigger on push: POST /v2/apps/{id}/deployments (force_build) after pushing.
 Signal definitions are governed by the vault: business-brain/09-Systems/Signal Contract.md —
 code changes to collector.py require a matching contract edit, same pass.
