@@ -18,58 +18,115 @@ DRIP_STEPS = [
 ]
 DRIP_MSGS = {}  # filled from env DRIP_MSG_1..5 so copy changes never need a code deploy
 
+# Tags that end the drip for a contact, whatever step they are on. GHL's opt-out
+# workflow adds 'customer replied stop'; Michelle adds 'out of area' by hand.
+DRIP_STOP_TAGS = {"no-sms", "duplicate-merge-needed", "customer replied stop",
+                  "out of area", "no longer interested", "dnd"}
+
+def _drip_eligible(c, start):
+    """(eligible, reason). Pure function of a contact record so it is testable."""
+    added = c.get("dateAdded") if isinstance(c.get("dateAdded"), str) else ""
+    if added[:10] < start:
+        return False, "before DRIP_START"
+    tags = [str(t).lower() for t in (c.get("tags") or []) if t]
+    stop = DRIP_STOP_TAGS.intersection(tags)
+    if stop:
+        return False, "stop tag: " + ",".join(sorted(stop))
+    if c.get("dnd") is True:
+        return False, "dnd"
+    dnd_settings = c.get("dndSettings") if isinstance(c.get("dndSettings"), dict) else {}
+    sms_setting = dnd_settings.get("SMS") if isinstance(dnd_settings.get("SMS"), dict) else {}
+    sms = sms_setting.get("status")
+    if sms and str(sms).lower() != "inactive":  # GHL enum: active | inactive | permanent
+        return False, "dnd sms"
+    if not ("funnel-lead" in tags or "facebook ads" in tags):
+        return False, "not ad-sourced"
+    return True, ""
+
 def _drip_pass():
     import urllib.parse as _up
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     if (os.environ.get("DRIP_ENABLED") or "").lower() != "true":
         return {"enabled": False}
+    dry = (os.environ.get("DRIP_DRY_RUN") or "").lower() == "true"
     ET = _tz(_td(hours=-4))
     now = _dt.now(_tz.utc)
     if not (9 <= now.astimezone(ET).hour < 19):
         return {"enabled": True, "skipped": "outside send window"}
     start = os.environ.get("DRIP_START", "2026-08-13")
     loc = os.environ["GHL_LOCATION"]
-    sent, errors = [], []
-    contacts, sa = [], None
+    sent, errors, skipped = [], [], {}
+    # GHL /contacts/ pagination needs BOTH startAfter (dateAdded ms) AND startAfterId.
+    # With startAfterId alone every page is the same first 100 contacts, so each
+    # eligible contact was processed 6x per pass and got every step 6x (2026-08-22 ->
+    # 2026-09-19, ~1,100 redundant SMS on the paid-lead cohort alone). Use the cursor
+    # GHL hands back and dedupe by id so a repeated page can never repeat a send.
+    contacts, seen, sa, sa_ts, pages = [], set(), None, None, 0
     for _ in range(6):
         q = {"locationId": loc, "limit": 100}
-        if sa: q["startAfterId"] = sa
+        if sa and sa_ts: q["startAfterId"] = sa; q["startAfter"] = sa_ts
         try:
-            page = json.loads(urllib.request.urlopen(urllib.request.Request(
-                GHL + "/contacts/?" + _up.urlencode(q),
-                headers={"Authorization": "Bearer " + os.environ["GHL_KEY"], "Version": "2021-07-28",
-                         "User-Agent": "cft-funnel-relay/1.0"}), timeout=45).read())
-        except Exception:
-            break
-        batch = page.get("contacts", [])
+            page = ghl_get("/contacts/?" + _up.urlencode(q))
+        except Exception as e:
+            errors.append({"page": pages, "err": str(e)[:100]}); break
+        pages += 1
+        batch = [c for c in page.get("contacts", []) if c.get("id") and c["id"] not in seen]
         if not batch: break
-        contacts.extend(batch); sa = batch[-1].get("id")
-        if batch[-1].get("dateAdded", "9999")[:10] < start: break
+        seen.update(c["id"] for c in batch); contacts.extend(batch)
+        meta = page.get("meta") or {}
+        sa, sa_ts = meta.get("startAfterId"), meta.get("startAfter")
+        if not (sa and sa_ts): break
+        if (batch[-1].get("dateAdded") or "9999")[:10] < start: break
     for c in contacts:
-        added = c.get("dateAdded") or ""
-        if added[:10] < start: continue
-        tags = [t.lower() for t in (c.get("tags") or [])]
-        if "no-sms" in tags or "duplicate-merge-needed" in tags: continue
-        if not ("funnel-lead" in tags or "facebook ads" in tags): continue
         try:
-            age_days = (now - _dt.fromisoformat(added.replace("Z", "+00:00"))).total_seconds() / 86400
-        except Exception:
-            continue
+            _drip_contact(c, start, now, sent, errors, skipped, dry)
+        except Exception as e:  # one malformed record must never abort the whole pass
+            errors.append({"contact": (c or {}).get("id"), "err": "record: " + str(e)[:80]})
+    return {"enabled": True, "dry_run": dry, "pages": pages, "contacts": len(contacts),
+            "sent": sent, "errors": errors, "skipped": skipped, "ran_at": now.isoformat()}
+
+def _drip_contact(c, start, now, sent, errors, skipped, dry):
+    from datetime import datetime as _dt
+    ok, why = _drip_eligible(c, start)
+    if not ok:
+        skipped[why] = skipped.get(why, 0) + 1; return
+    age_days = (now - _dt.fromisoformat((c.get("dateAdded") or "").replace("Z", "+00:00"))).total_seconds() / 86400
+    tags = [str(t).lower() for t in (c.get("tags") or []) if t]
+    if True:
         for step in DRIP_STEPS:
             if age_days >= step["day"] and step["tag"] not in tags:
                 msg = os.environ.get("DRIP_MSG_" + step["tag"][-1], "")
                 if not msg: break
-                first = (c.get("firstName") or "").strip().title()
+                # The list above is served from a search index that can lag; re-read the
+                # contact itself right before sending so a step already sent (or a fresh
+                # opt-out) can never be sent again.
+                try:
+                    fresh = (ghl_get("/contacts/" + c["id"]) or {}).get("contact") or {}
+                except Exception as e:
+                    errors.append({"contact": c["id"], "err": "refetch: " + str(e)[:80]}); break
+                ok2, why2 = _drip_eligible(fresh, start)
+                ftags = [str(t).lower() for t in (fresh.get("tags") or []) if t]
+                if not ok2 or step["tag"] in ftags:
+                    key = "fresh: " + (why2 or "step already sent")
+                    skipped[key] = skipped.get(key, 0) + 1
+                    break
+                first = ((fresh.get("firstName") or "").strip() or (c.get("firstName") or "").strip()).title()
                 msg = msg.replace("{name}", first) if first else msg.replace(" {name}", "").replace("{name}", "")
+                if dry:
+                    sent.append({"contact": c["id"], "step": step["tag"], "dry_run": True}); break
+                # Tag BEFORE sending: the tag is the state. If the send then fails, this
+                # contact loses one nurture text; the reverse order (send, then tag) turned a
+                # failed tag write into a duplicate text on the next pass.
+                try:
+                    ghl("/contacts/" + c["id"] + "/tags", {"tags": [step["tag"]]})
+                except Exception as e:
+                    errors.append({"contact": c["id"], "err": "tag: " + str(e)[:90]}); break
                 try:
                     ghl("/conversations/messages", {"type": "SMS", "contactId": c["id"], "message": msg})
-                    ghl("/contacts/" + c["id"] + "/tags", {"tags": [step["tag"]]})
                     sent.append({"contact": c["id"], "step": step["tag"]})
                 except Exception as e:
-                    errors.append({"contact": c["id"], "err": str(e)[:100]})
+                    errors.append({"contact": c["id"], "step": step["tag"], "err": "send (step tagged, not resent): " + str(e)[:80]})
                 break  # max one step per contact per pass (spacing guarantee)
-    return {"enabled": True, "sent": sent, "errors": errors, "ran_at": now.isoformat()}
-
 
 DASH = {"data": None, "ts": 0.0, "lock": threading.Lock(), "running": False, "janitor": None, "drip": None, "alerted": set()}
 
@@ -216,6 +273,13 @@ CORS = {"Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
         "Content-Type": "application/json"}
+
+def ghl_get(path):
+    req = urllib.request.Request(GHL + path,
+        headers={"Authorization": "Bearer " + os.environ["GHL_KEY"], "Version": "2021-07-28",
+                 "User-Agent": "cft-funnel-relay/1.0", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=45) as r:
+        return json.load(r)
 
 def ghl(path, payload):
     req = urllib.request.Request(GHL + path, data=json.dumps(payload).encode(),
