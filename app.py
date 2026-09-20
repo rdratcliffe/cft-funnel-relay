@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import collector
 import janitor as janitor_mod
+import net
 
 # ---- Lead-only nurture drip (GHL SMS; PRIVATE channel — no Meta Ad Library exposure) ----
 # ENABLED only when env DRIP_ENABLED=true (operator gate: copy approved 1:1 before enable).
@@ -82,8 +83,53 @@ def _drip_pass():
             _drip_contact(c, start, now, sent, errors, skipped, dry)
         except Exception as e:  # one malformed record must never abort the whole pass
             errors.append({"contact": (c or {}).get("id"), "err": "record: " + str(e)[:80]})
+    dupes = [] if dry else _drip_duplicate_check(sent, now)
+    if not dry:
+        # Always called, even with no dupes, so the per-scope dedup clears between incidents and a
+        # second incident can never be muted by the first (contact ids lead the detail for the same reason).
+        _alert([{"level": "critical", "code": "DRIP_DUPLICATE",
+                 "detail": "%s: %d contact(s) got the same drip text more than once in this pass" % (", ".join(d["contact"] for d in dupes)[:48], len(dupes))}] if dupes else [], scope="drip")
     return {"enabled": True, "dry_run": dry, "pages": pages, "contacts": len(contacts),
-            "sent": sent, "errors": errors, "skipped": skipped, "ran_at": now.isoformat()}
+            "sent": sent, "errors": errors, "skipped": skipped, "duplicates": dupes, "ran_at": now.isoformat()}
+
+def _drip_copies(messages, body, now):
+    """Pure: how many outbound copies of `body` (the text actually sent, name substituted) landed
+    in the last 30 minutes. Matches on the first 40 characters of the real body, so templates that
+    open with the lead's name are matched correctly."""
+    from datetime import timedelta as _td
+    key = (body or "").strip()[:40]
+    if not key:
+        return 0
+    copies = 0
+    for x in messages or []:
+        if (x.get("direction") or "").lower() != "outbound":
+            continue
+        if not (x.get("body") or "").strip().startswith(key):
+            continue
+        t = net.parse_ts(x.get("dateAdded"))
+        if t and t >= now - _td(minutes=30):
+            copies += 1
+    return copies
+
+def _drip_duplicate_check(sent, now):
+    """Post-send verification: re-read each contact's conversation and count copies of the text
+    just sent in the last 30 minutes. The 2026-08-22..09-19 six-times bug would have tripped this
+    on its first pass; it must never be silent again. Never raises."""
+    import urllib.parse as _up
+    dupes = []
+    for s in sent:
+        try:
+            convs = ghl_get("/conversations/search?" + _up.urlencode({"locationId": os.environ["GHL_LOCATION"], "contactId": s["contact"]})).get("conversations") or []
+            msgs = []
+            for cv in convs:
+                m = ghl_get("/conversations/%s/messages?limit=50" % cv["id"]).get("messages", [])
+                msgs.extend(m.get("messages", []) if isinstance(m, dict) else (m or []))
+            copies = _drip_copies(msgs, s.get("body"), now)
+            if copies > 1:
+                dupes.append({"contact": s["contact"], "step": s["step"], "copies": copies})
+        except Exception:
+            continue  # verification must never break the pass; the dashboard shows the sent list regardless
+    return dupes
 
 def _drip_contact(c, start, now, sent, errors, skipped, dry):
     from datetime import datetime as _dt
@@ -123,22 +169,26 @@ def _drip_contact(c, start, now, sent, errors, skipped, dry):
                     errors.append({"contact": c["id"], "err": "tag: " + str(e)[:90]}); break
                 try:
                     ghl("/conversations/messages", {"type": "SMS", "contactId": c["id"], "message": msg})
-                    sent.append({"contact": c["id"], "step": step["tag"]})
+                    sent.append({"contact": c["id"], "step": step["tag"], "body": msg})
                 except Exception as e:
                     errors.append({"contact": c["id"], "step": step["tag"], "err": "send (step tagged, not resent): " + str(e)[:80]})
                 break  # max one step per contact per pass (spacing guarantee)
 
-DASH = {"data": None, "ts": 0.0, "lock": threading.Lock(), "running": False, "janitor": None, "drip": None, "alerted": set()}
+DASH = {"data": None, "ts": 0.0, "lock": threading.Lock(), "running": False, "janitor": None, "drip": None, "net": None, "net_lock": threading.Lock(), "net_running": False, "alerted": {}}
 
-def _alert(alarms):
-    """Email the operator on NEW critical/serious alarms (dashboard is pull; this is the push)."""
+def _alert(alarms, scope="watchdog"):
+    """Email the operator on NEW critical/serious alarms (dashboard is pull; this is the push).
+    Dedup state is kept per caller (`scope`) so the drip's alarms and the collector's never clobber each other."""
     key = os.environ.get("SENDGRID_API_KEY"); to = os.environ.get("ALERT_EMAIL")
     if not key or not to:
         return
     hot = {f"{a['code']}|{a['detail'][:60]}" for a in alarms if a.get("level") in ("critical", "serious")}
-    new = hot - DASH.get("alerted", set())
+    alerted = DASH.setdefault("alerted", {})
+    if not isinstance(alerted, dict):
+        alerted = DASH["alerted"] = {}
+    new = hot - alerted.get(scope, set())
     if not new:
-        DASH["alerted"] = hot
+        alerted[scope] = hot
         return
     lines = [a for a in alarms if a.get("level") in ("critical", "serious")]
     body = "CFT Funnel Watchdog:\n\n" + "\n".join(f"[{a['level'].upper()}] {a['code']}: {a['detail']}" for a in lines) \
@@ -152,7 +202,7 @@ def _alert(alarms):
                                      data=json.dumps(payload).encode(),
                                      headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
         r = urllib.request.urlopen(req, timeout=30)
-        DASH["alerted"] = hot
+        alerted[scope] = hot
         DASH["alert_status"] = {"ok": True, "http": r.status, "at": datetime.now(timezone.utc).isoformat(), "alarms": len(new)}
     except Exception as e:
         # NEVER silent: surface on the dashboard payload; the collector run also re-alerts next pass
@@ -257,6 +307,45 @@ def _janitor_loop():
         except Exception as e:
             DASH["reconciler"] = {"error": str(e)[:200]}
         _time.sleep(1800)
+
+def _net_run(send=True):
+    """Compute the Net and (optionally) email it. Runs at boot and at 9:00 / 13:00 / 17:00 ET Mon-Sat.
+    Stateless; nothing to drift. Never raises: a failure lands on the dashboard as an error result."""
+    with DASH["net_lock"]:
+        if DASH["net_running"]:
+            return DASH.get("net")
+        DASH["net_running"] = True
+    try:
+        try:
+            result = net.compute()
+        except Exception as e:
+            result = {"error": str(e)[:300], "generated_at": datetime.now(timezone.utc).isoformat(),
+                      "untouched_leads": [], "waiting_on_reply": [], "errors": [str(e)[:200]]}
+        if send:
+            try:
+                result["delivery"] = net.send_email(result)
+            except Exception as e:
+                result["delivery"] = {"ok": False, "error": "send: " + str(e)[:200]}
+        elif isinstance(DASH.get("net"), dict) and DASH["net"].get("delivery"):
+            result["delivery"] = DASH["net"]["delivery"]  # keep the last real delivery receipt visible
+        DASH["net"] = result
+        return result
+    finally:
+        DASH["net_running"] = False
+
+def _net_loop():
+    if (os.environ.get("NET_ENABLED") or "true").lower() != "true":
+        return
+    # Boot: always compute (warm dashboard, catch the backlog); only EMAIL when a person would be
+    # reading it — business hours and not within 15 min of a scheduled slot (avoids a double).
+    now = datetime.now(timezone.utc)
+    et_hour = now.astimezone(net.ET).hour
+    boot_send = 8 <= et_hour < 20 and now.astimezone(net.ET).weekday() < 6 and (net.next_slot(now) - now).total_seconds() > 15 * 60
+    _net_run(send=boot_send)
+    while True:
+        target = net.next_slot()
+        _time.sleep(max(60, (target - datetime.now(timezone.utc)).total_seconds()))
+        _net_run()
 
 def _daily_loop():
     _collect_now()
@@ -373,7 +462,22 @@ class H(BaseHTTPRequestHandler):
             if qs.get("refresh", ["0"])[0] == "1" or DASH["data"] is None:
                 _collect_now()
             self._send(200, {"ok": True, "stale_seconds": int(_time.time() - DASH["ts"]) if DASH["ts"] else None,
-                             "janitor": DASH["janitor"], "drip": DASH["drip"], "reconciler": DASH.get("reconciler"), "alert_status": DASH.get("alert_status"), "report": DASH["data"]})
+                             "janitor": DASH["janitor"], "drip": DASH["drip"], "reconciler": DASH.get("reconciler"), "alert_status": DASH.get("alert_status"),
+                             "net": {k: (len(v) if isinstance(v, list) else v) for k, v in (DASH.get("net") or {}).items() if k in ("generated_at", "untouched_leads", "waiting_on_reply", "delivery", "errors")},
+                             "report": DASH["data"]})
+            return
+        if parsed.path == "/net":
+            if not key_ok:
+                self._send(401, {"ok": False, "error": "key required"}); return
+            want_send = qs.get("send", ["0"])[0] == "1"
+            if want_send or qs.get("refresh", ["0"])[0] == "1" or DASH.get("net") is None:
+                # A run takes ~2 min of GHL reads; never block the single-threaded server (the
+                # funnel lead endpoint lives here). Kick it off and report; poll without refresh.
+                if not DASH["net_running"]:
+                    threading.Thread(target=_net_run, kwargs={"send": want_send}, daemon=True).start()
+                self._send(202, {"ok": True, "running": True, "send": want_send, "net": DASH.get("net")})
+                return
+            self._send(200, {"ok": True, "running": DASH["net_running"], "net": DASH.get("net")})
             return
         self._send(200, {"ok": True, "service": "cft-funnel-relay"})
     def do_POST(self):
@@ -389,4 +493,5 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     threading.Thread(target=_daily_loop, daemon=True).start()
     threading.Thread(target=_janitor_loop, daemon=True).start()
+    threading.Thread(target=_net_loop, daemon=True).start()
     HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), H).serve_forever()
