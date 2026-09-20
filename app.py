@@ -466,7 +466,7 @@ class H(BaseHTTPRequestHandler):
                              "net": {k: (len(v) if isinstance(v, list) else v) for k, v in (DASH.get("net") or {}).items() if k in ("generated_at", "untouched_leads", "waiting_on_reply", "delivery", "errors")},
                              "report": DASH["data"]})
             return
-        if parsed.path == "/net":
+        if parsed.path in ("/dash/net", "/net"):  # ingress only routes /dash* and /funnel* to this service
             if not key_ok:
                 self._send(401, {"ok": False, "error": "key required"}); return
             want_send = qs.get("send", ["0"])[0] == "1"

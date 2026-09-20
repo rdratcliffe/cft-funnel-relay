@@ -10,7 +10,7 @@ session that built this is required for it to keep running.
 | Funnel Scorecard (/dash + collector.py) | stdlib-only, env-configured | Mount as a DealerOS route/job — BUT keep pulling from the systems of record per the Signal Contract (Meta ledger/GHL/HCP), never from DealerOS's mirror tables |
 | Dupe janitor (janitor.py) | 30-min loop | Retire ONLY after DealerOS voice call-logging does find-or-create upsert by E.164 phone (the root-cause bug filed in vault Signal Contract) |
 | Lead nurture drip (_drip_pass) | env-gated, copy in DRIP_MSG_1..5 | Move to DealerOS scheduler or keep; GHL tags are the state, so it's restart/migrate-safe |
-| The Net (net.py + /net) | untouched paid leads + lead-spoke-last-no-human-reply, emailed 9/13/17 ET Mon-Sat + at boot | The product home is DealerOS Sales OS (GAP tier 1.5 unified inbox); keep the two definitions verbatim when it moves |
+| The Net (net.py + /dash/net) | untouched paid leads + lead-spoke-last-no-human-reply, emailed 9/13/17 ET Mon-Sat + at boot | The product home is DealerOS Sales OS (GAP tier 1.5 unified inbox); keep the two definitions verbatim when it moves |
 
 Config = env vars only: GHL_KEY, GHL_LOCATION, PIPELINE_ID, STAGE_ID, FACEBOOK_ACCESS_TOKEN,
 HCP_API_KEY, DASH_KEY, SENDGRID_API_KEY, ALERT_EMAIL, DRIP_ENABLED, DRIP_START, DRIP_MSG_1..5,

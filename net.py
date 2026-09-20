@@ -323,7 +323,7 @@ def render_text(result):
     if result.get("errors"):
         lines += ["", "⚠ %d lookup error(s) — some people may be missing from this list:" % len(result["errors"])] + ["  " + e for e in result["errors"][:5]]
     lines += ["", "Rules: human = a message sent by a person in GHL; automation does not count. Opt-outs and out-of-area are excluded.",
-              "Sent by cft-funnel-relay /net."]
+              "Sent by cft-funnel-relay /dash/net."]
     return "\n".join(lines)
 
 
