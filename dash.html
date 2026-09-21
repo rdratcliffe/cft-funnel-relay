@@ -171,6 +171,12 @@ async function load(refresh) {
     const r = await fetch(`/dash/data?key=${encodeURIComponent(KEY)}${refresh ? "&refresh=1" : ""}`);
     if (r.status === 401) { document.getElementById("app").innerHTML = '<div class="err">Bad or missing key.</div>'; return; }
     const j = await r.json();
+    if (j.running) {  // a recompute takes ~5 min and runs in the background; keep the last data on screen and poll
+      document.getElementById("meta").textContent = "recomputing from source… (about 5 minutes; this page updates itself)";
+      if (j.report && !j.report.error) render(j.report, j.janitor);
+      setTimeout(() => load(false), 15000);
+      return;
+    }
     if (!j.report || j.report.error) { document.getElementById("app").innerHTML = `<div class="err">Collector error: ${(j.report || {}).error || "no data"}</div>`; return; }
     render(j.report, j.janitor);
     const gen = new Date(j.report.generated_at).toLocaleString("en-US", { timeZone: "America/New_York" });

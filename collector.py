@@ -12,7 +12,7 @@ stdlib only. Stateless recompute."""
 import os, json, urllib.request, urllib.parse
 from datetime import datetime, timedelta, timezone
 
-SIGNAL_CONTRACT_VERSION = "1.0.0"   # bump ONLY with a matching edit to vault 09-Systems/Signal Contract.md
+SIGNAL_CONTRACT_VERSION = "1.2.0"   # bump ONLY with a matching edit to vault 09-Systems/Signal Contract.md
 EPOCH = "2026-08-10"
 HCP_KILL_UTC = "2026-08-12T18:00:00Z"
 ET = timezone(timedelta(hours=-4))        # America/New_York (DST); revisit at Nov clock change
@@ -82,12 +82,16 @@ def collect():
     # ---- 2. Lead ledger (mechanism: Meta form submissions) ----
     ledger = []
     for form in FORMS:
-        url = f"{FB}/{form}/leads?fields=created_time,ad_name&limit=100&access_token={fb_tok}"
+        url = f"{FB}/{form}/leads?fields=created_time,ad_name,field_data&limit=100&access_token={fb_tok}"
         while url:
             page = _safe(lambda: _get(url), {"data": []})
             for l in page.get("data", []):
                 if l["created_time"][:10] >= EPOCH:
-                    ledger.append({"created": l["created_time"], "ad": l.get("ad_name", "?")})
+                    fd = {f.get("name"): str((f.get("values") or [""])[0] or "") for f in (l.get("field_data") or [])}
+                    ledger.append({"created": l["created_time"], "ad": l.get("ad_name", "?"),
+                                   "name": (fd.get("full_name") or " ".join(filter(None, [fd.get("first_name"), fd.get("last_name")]))).strip() or "(no name)",
+                                   "phone10": _phone10(next((v for k, v in fd.items() if k and "phone" in k.lower()), "")),
+                                   "email": next((v for k, v in fd.items() if k and "email" in k.lower()), "").strip().lower()})
             url = page.get("paging", {}).get("next")
             if page.get("data") and page["data"][-1]["created_time"][:10] < EPOCH:
                 break
@@ -96,16 +100,30 @@ def collect():
         ledger_by_day[l["created"][:10]] = ledger_by_day.get(l["created"][:10], 0) + 1
 
     # ---- 3. GHL contacts -> PERSON ENTITIES (mechanism: phone-resolved identity) ----
-    contacts, start_after = [], None
-    for _ in range(10):
+    # GHL /contacts/ pagination needs BOTH startAfter (dateAdded ms) and startAfterId; with the id
+    # alone every page is the same first 100 (found 2026-09-19 in the drip, 09-21 here: every
+    # metric below had been computed from the newest 100 contacts only). Cursor + dedupe by id.
+    contacts, seen, start_after, start_after_ts = [], set(), None, None
+    paging_error, paging_exhausted = None, False
+    for page_no in range(15):
         q = {"locationId": loc, "limit": 100}
-        if start_after: q["startAfterId"] = start_after
-        page = _safe(lambda: _get(f"{GHL}/contacts/?" + urllib.parse.urlencode(q), ghl_h), {"contacts": []})
-        batch = page.get("contacts", [])
+        if start_after and start_after_ts: q["startAfterId"] = start_after; q["startAfter"] = start_after_ts
+        try:
+            page = _get(f"{GHL}/contacts/?" + urllib.parse.urlencode(q), ghl_h)
+        except Exception as e:
+            paging_error = f"ghl contact paging failed at page {page_no + 1}: {str(e)[:80]} — cohort truncated at {len(contacts)} rows"
+            break
+        batch = [c for c in page.get("contacts", []) if c.get("id") and c["id"] not in seen]
         if not batch: break
-        contacts.extend(batch)
-        start_after = batch[-1].get("id")
-        if batch[-1].get("dateAdded", "9999")[:10] < EPOCH: break
+        seen.update(c["id"] for c in batch); contacts.extend(batch)
+        meta = page.get("meta") or {}
+        start_after, start_after_ts = meta.get("startAfterId"), meta.get("startAfter")
+        if not (start_after and start_after_ts): break
+        if (batch[-1].get("dateAdded") or "9999")[:10] < EPOCH: break
+    else:
+        paging_exhausted = True  # 15 pages read and still inside the EPOCH window
+    cohort_phones = {_phone10(c.get("phone")) for c in contacts if c.get("phone")}
+    cohort_emails = {(c.get("email") or "").strip().lower() for c in contacts if c.get("email")}
     rows = [c for c in {c["id"]: c for c in contacts}.values()
             if (c.get("dateAdded") or "")[:10] >= EPOCH]
     entities, unnamed_inbound, dupes = {}, [], {}
@@ -236,13 +254,43 @@ def collect():
     ad_intel.sort(key=lambda a: -a["spend7d"])
 
     # ---- 6. Watchdog ----
-    ghl_if_by_day = {}
-    for l in leads:
-        if l["source"] == "instant_form":
-            d = l["created"][:10]; ghl_if_by_day[d] = ghl_if_by_day.get(d, 0) + 1
-    for d, n in ledger_by_day.items():
-        if d < today and ghl_if_by_day.get(d, 0) < n:
-            alarm("critical", "MAPPING_BROKEN", f"{d}: {n} form submissions but only {ghl_if_by_day.get(d,0)} reached GHL")
+    # MAPPING_BROKEN v1.2.0: a form lead is "mapped" when ANY GHL contact carries its phone or
+    # email, whenever that contact was created. Returning homeowners merge into their old record and
+    # never create a contact, so counting contacts-created-that-day (v1.0.0) raised ~35 false
+    # criticals a day and drove an automation that damaged two contacts (2026-09-19..21).
+    lookup_cache, lookup_errors = {}, 0
+    stats = {"lookups": 0, "hits": 0, "cohort_matches": 0}  # proves the direct-search path is exercised
+    def _in_ghl(ph, em):
+        nonlocal lookup_errors
+        if (ph and ph in cohort_phones) or (em and em in cohort_emails):
+            stats["cohort_matches"] += 1
+            return True
+        for q in ([ph] if ph else []) + ([em] if em else []):
+            if q in lookup_cache:
+                if lookup_cache[q]: return True
+                continue
+            stats["lookups"] += 1
+            try:
+                req = urllib.request.Request(f"{GHL}/contacts/search", data=json.dumps({"locationId": loc, "pageLimit": 3, "query": q}).encode(),
+                                             headers={**ghl_h, "Content-Type": "application/json", "User-Agent": UA, "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=45) as r:
+                    hits = json.load(r).get("contacts") or []
+                hit = any((ph and _phone10(h.get("phone")) == ph) or (em and (h.get("email") or "").strip().lower() == em) for h in hits)
+                stats["hits"] += bool(hit)
+            except Exception:
+                lookup_errors += 1; hit = True  # unknown != broken; never raise MAPPING_BROKEN on our own outage
+            lookup_cache[q] = hit
+            if hit: return True
+        return False
+    unmapped = [l for l in ledger if l["created"][:10] < today and not _in_ghl(l["phone10"], l["email"])]
+    unmapped_by_day = {}
+    for l in unmapped:
+        unmapped_by_day.setdefault(l["created"][:10], []).append(l["name"])
+    for d in sorted(unmapped_by_day):
+        names = unmapped_by_day[d]
+        alarm("critical", "MAPPING_BROKEN", f"{d}: {len(names)} of {ledger_by_day.get(d, 0)} form leads have NO GHL contact by phone/email: " + ", ".join(names[:4]) + (" …" if len(names) > 4 else ""))
+    if lookup_errors:
+        alarm("warning", "MAPPING_CHECK_DEGRADED", f"{lookup_errors} GHL lookups failed; those leads were assumed mapped")
     last3 = sorted([d for d in daily if d < today])[-3:]
     sp3 = sum(daily[d].get("A", {}).get("spend", 0) for d in last3)
     ld3 = sum(ledger_by_day.get(d, 0) for d in last3)
@@ -284,7 +332,10 @@ def collect():
                 if l["first_call_min"] > 15: sla_breaches += 1
         elif in_biz and (now - t0.astimezone(timezone.utc)).total_seconds() > 7200:
             sla_breaches += 1
-            alarm("serious", "SLA_BREACH", f"{l['name']} ({l['source']}) uncalled for >2h")
+            # Alarm only on ACTIVE breaches (lead <48h old). Older uncalled leads stay in the
+            # breach COUNT but are history, not a page; the Net (/dash/net) carries the live list.
+            if (now - t0.astimezone(timezone.utc)).total_seconds() < 48 * 3600:
+                alarm("serious", "SLA_BREACH", f"{l['name']} ({l['source']}) uncalled for >2h")
     hr_now = now.astimezone(ET).hour
     if BIZ_START + 3 <= hr_now < BIZ_END:
         hourly = _safe(lambda: _get(f"{FB}/act_506325703451497/insights?" + urllib.parse.urlencode({
@@ -307,6 +358,7 @@ def collect():
         alarm("critical", "INFRA_DOWN", f"funnel page unreachable: {str(e)[:80]}")
     # ---- SIGNAL INTEGRITY (deterministic node lock): verify each node's shape; alarm, never guess ----
     integrity = []
+    if paging_error: integrity.append(paging_error)
     if not ins.get("data"): integrity.append("meta-insights returned no rows")
     if jobs and not all(isinstance(j.get("total_amount"), int) for j in jobs[:5]):
         integrity.append("hcp job total_amount no longer integer cents")
@@ -320,7 +372,7 @@ def collect():
     if novel: integrity.append(f"novel estimate work_status values (extend contract): {sorted(novel)[:4]}")
     if rows and not all(c.get("dateAdded") for c in rows[:5]):
         integrity.append("ghl contact dateAdded missing")
-    if len(contacts) >= 1000: integrity.append("ghl pagination hit cap — cohort may be truncated")
+    if paging_exhausted: integrity.append("ghl pagination hit cap — cohort may be truncated")
     for msg in integrity:
         alarm("critical", "SIGNAL_INTEGRITY", msg)
     if not alarms:
@@ -345,7 +397,10 @@ def collect():
         "daily": [{"date": d,
                    "A": {k: round(v, 2) if isinstance(v, float) else v for k, v in daily[d].get("A", {}).items()},
                    "B": {k: round(v, 2) if isinstance(v, float) else v for k, v in daily[d].get("B", {}).items()},
-                   "ledger_leads": ledger_by_day.get(d, 0)} for d in sorted(daily)],
+                   "ledger_leads": ledger_by_day.get(d, 0),
+                   "unmapped_leads": len(unmapped_by_day.get(d, []))} for d in sorted(daily)],
+        "unmapped_leads": [{"date": l["created"][:10], "name": l["name"], "ad": l["ad"], "has_phone": bool(l["phone10"]), "has_email": bool(l["email"])} for l in unmapped],
+        "mapping_check": {**stats, "lookup_errors": lookup_errors, "ledger_leads": len(ledger)},
         "funnel": funnel,
         "estimates": sorted(est_rows, key=lambda r: r["created"] or "", reverse=True),
         "jobs": sorted(job_rows, key=lambda r: r["created"] or "", reverse=True),
