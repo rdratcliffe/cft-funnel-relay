@@ -92,10 +92,20 @@ def _drip_pass():
     return {"enabled": True, "dry_run": dry, "pages": pages, "contacts": len(contacts),
             "sent": sent, "errors": errors, "skipped": skipped, "duplicates": dupes, "ran_at": now.isoformat()}
 
-def _drip_copies(messages, body, now):
+def _drip_thread(contact_id):
+    """All raw messages across a contact's conversations (read-only)."""
+    import urllib.parse as _up
+    msgs = []
+    for cv in ghl_get("/conversations/search?" + _up.urlencode({"locationId": os.environ["GHL_LOCATION"], "contactId": contact_id})).get("conversations") or []:
+        m = ghl_get("/conversations/%s/messages?limit=100" % cv["id"]).get("messages", [])
+        msgs.extend(m.get("messages", []) if isinstance(m, dict) else (m or []))
+    return msgs
+
+def _drip_copies(messages, body, now, minutes=24 * 60):
     """Pure: how many outbound copies of `body` (the text actually sent, name substituted) landed
-    in the last 30 minutes. Matches on the first 40 characters of the real body, so templates that
-    open with the lead's name are matched correctly."""
+    in the last `minutes` (None = ever; default 24h — a step is sent once, so a second copy on any pass that day
+    is a duplicate; the 30-min window missed once-per-pass repeats). Matches on the first 40
+    characters of the real body, so templates that open with the lead's name are matched correctly."""
     from datetime import timedelta as _td
     key = (body or "").strip()[:40]
     if not key:
@@ -107,24 +117,19 @@ def _drip_copies(messages, body, now):
         if not (x.get("body") or "").strip().startswith(key):
             continue
         t = net.parse_ts(x.get("dateAdded"))
-        if t and t >= now - _td(minutes=30):
+        if t and (minutes is None or t >= now - _td(minutes=minutes)):
             copies += 1
     return copies
 
 def _drip_duplicate_check(sent, now):
     """Post-send verification: re-read each contact's conversation and count copies of the text
-    just sent in the last 30 minutes. The 2026-08-22..09-19 six-times bug would have tripped this
+    just sent in the last 24 hours. The 2026-08-22..09-19 six-times bug would have tripped this
     on its first pass; it must never be silent again. Never raises."""
     import urllib.parse as _up
     dupes = []
     for s in sent:
         try:
-            convs = ghl_get("/conversations/search?" + _up.urlencode({"locationId": os.environ["GHL_LOCATION"], "contactId": s["contact"]})).get("conversations") or []
-            msgs = []
-            for cv in convs:
-                m = ghl_get("/conversations/%s/messages?limit=50" % cv["id"]).get("messages", [])
-                msgs.extend(m.get("messages", []) if isinstance(m, dict) else (m or []))
-            copies = _drip_copies(msgs, s.get("body"), now)
+            copies = _drip_copies(_drip_thread(s["contact"]), s.get("body"), now)
             if copies > 1:
                 dupes.append({"contact": s["contact"], "step": s["step"], "copies": copies})
         except Exception:
@@ -158,6 +163,17 @@ def _drip_contact(c, start, now, sent, errors, skipped, dry):
                     break
                 first = ((fresh.get("firstName") or "").strip() or (c.get("firstName") or "").strip()).title()
                 msg = msg.replace("{name}", first) if first else msg.replace(" {name}", "").replace("{name}", "")
+                # Tags can be wiped by anything that upserts the contact. The conversation cannot:
+                # if this step's text is already in the thread (last 30 days), it was sent. Re-tag, skip.
+                try:
+                    if _drip_copies(_drip_thread(c["id"]), msg, now, minutes=None) >= 1:
+                        skipped["thread already has step"] = skipped.get("thread already has step", 0) + 1
+                        if not dry:
+                            try: ghl("/contacts/" + c["id"] + "/tags", {"tags": [step["tag"]]})
+                            except Exception: pass
+                        break
+                except Exception as e:
+                    errors.append({"contact": c["id"], "err": "thread check: " + str(e)[:80]}); break
                 if dry:
                     sent.append({"contact": c["id"], "step": step["tag"], "dry_run": True}); break
                 # Tag BEFORE sending: the tag is the state. If the send then fails, this
@@ -246,27 +262,50 @@ def _reconcile_ledger():
             if l["created_time"][:10] >= since:
                 fd = {f["name"]: f.get("values", [""])[0] for f in l.get("field_data", [])}
                 ledger.append({"created": l["created_time"], "ad": l.get("ad_name"), **fd})
-    phones = set()
-    sa = None
-    for _ in range(5):
+    # Known phones/emails from the newest contacts. Paging needs BOTH startAfter and startAfterId
+    # (the drip had the same bug: startAfterId alone returns the same first 100 five times, so any
+    # lead older than the newest 100 looked "missing" and was re-recovered every 30 minutes —
+    # 2026-09-19..21: 155 duplicate tasks/notes on two contacts, and the upsert wiped their drip
+    # tags so the drip re-sent step 1 every pass until one of them replied STOP).
+    phones, emails, seen = set(), set(), set()
+    sa, sa_ts = None, None
+    for _ in range(6):
         q = {"locationId": loc, "limit": 100}
-        if sa: q["startAfterId"] = sa
+        if sa and sa_ts: q["startAfterId"] = sa; q["startAfter"] = sa_ts
         try:
-            page = json.loads(urllib.request.urlopen(urllib.request.Request(
-                GHL + "/contacts/?" + _up.urlencode(q),
-                headers={"Authorization": "Bearer " + os.environ["GHL_KEY"], "Version": "2021-07-28",
-                         "User-Agent": "cft-funnel-relay/1.0"}), timeout=45).read())
+            page = ghl_get("/contacts/?" + _up.urlencode(q))
         except Exception:
             break
-        batch = page.get("contacts", [])
+        batch = [c for c in page.get("contacts", []) if c.get("id") and c["id"] not in seen]
         if not batch: break
-        phones |= {_p10(c.get("phone")) for c in batch}
-        sa = batch[-1].get("id")
-        if batch[-1].get("dateAdded", "9999")[:10] < since: break
+        seen.update(c["id"] for c in batch)
+        phones |= {_p10(c.get("phone")) for c in batch if c.get("phone")}
+        emails |= {(c.get("email") or "").strip().lower() for c in batch if c.get("email")}
+        meta = page.get("meta") or {}
+        sa, sa_ts = meta.get("startAfterId"), meta.get("startAfter")
+        if not (sa and sa_ts): break
+        if (batch[-1].get("dateAdded") or "9999")[:10] < since: break
+    stats = {"lookups": 0, "lookup_errors": 0, "last_lookup_error": None, "existed": 0}
+    def _exists_in_ghl(ph, em):
+        """Direct lookup by phone, then email. Recovery happens ONLY when GHL itself says nobody
+        has this phone/email — the paged list above is an optimisation, never the verdict.
+        A failed lookup counts as 'exists' (never create on uncertainty) AND is counted, so a dead
+        search endpoint shows on the dashboard instead of silently disabling recovery."""
+        for q in ([ph] if ph else []) + ([em] if em else []):
+            stats["lookups"] += 1
+            try:
+                hits = ghl("/contacts/search", {"locationId": loc, "pageLimit": 3, "query": q}).get("contacts") or []
+                if any(_p10(h.get("phone")) == ph or (em and (h.get("email") or "").strip().lower() == em) for h in hits):
+                    return True
+            except Exception as e:
+                stats["lookup_errors"] += 1; stats["last_lookup_error"] = str(e)[:120]
+                return True
+        return False
     recovered = []
     for l in ledger:
-        ph = _p10(l.get("phone_number"))
-        if not ph or ph in phones: continue
+        ph = _p10(l.get("phone_number")); em = (l.get("email") or "").strip().lower()
+        if not ph or ph in phones or (em and em in emails): continue
+        if _exists_in_ghl(ph, em): phones.add(ph); stats["existed"] += 1; continue
         name = (l.get("full_name") or "").split(" ", 1)
         first, last = name[0] or "Lead", (name[1] if len(name) > 1 else "")
         interest = l.get("what_are_you_lighting") or "not specified"
@@ -274,9 +313,17 @@ def _reconcile_ledger():
             c = ghl("/contacts/upsert", {"locationId": loc, "firstName": first, "lastName": last,
                     "phone": "+1" + ph, "email": l.get("email") or None,
                     "address1": l.get("street_address") or "", "city": l.get("city") or "",
-                    "postalCode": l.get("zip_code") or "",
-                    "tags": ["facebook ads", "recovered-lead"], "source": "Facebook Ads"})
+                    "postalCode": l.get("zip_code") or "", "source": "Facebook Ads"})
             cid = c["contact"]["id"]
+            if c.get("new") is False:
+                # GHL matched an existing contact after all: no note / opportunity / task, or the
+                # 2026-09-19..21 duplicate storm repeats. The search gate above is belt; this is braces.
+                phones.add(ph); stats["existed"] += 1
+                recovered.append({"name": (first + " " + last).strip(), "skipped": "existed at upsert"})
+                continue
+            # Tags are ADDED, never passed to upsert: GHL upsert replaces the whole tag list.
+            try: ghl("/contacts/" + cid + "/tags", {"tags": ["facebook ads", "recovered-lead"]})
+            except Exception: pass
             note = f"AUTO-RECOVERED (form->GHL sync gap)\nAd: {l.get('ad')}\nSubmitted: {l['created']}\nInterest: {interest}"
             for fn in (lambda: ghl("/contacts/" + cid + "/notes", {"body": note}),
                        lambda: ghl("/opportunities/", {"locationId": loc, "pipelineId": os.environ["PIPELINE_ID"],
@@ -290,7 +337,12 @@ def _reconcile_ledger():
             recovered.append({"name": (first + " " + last).strip(), "submitted": l["created"]})
         except Exception as e:
             recovered.append({"error": str(e)[:80]})
-    return {"recovered": recovered, "ledger_checked": len(ledger)}
+    if stats["lookup_errors"]:
+        _alert([{"level": "serious", "code": "RECONCILER_LOOKUP_FAILED",
+                 "detail": "%d of %d GHL contact lookups failed (%s); recovery is fail-closed until this clears" % (stats["lookup_errors"], stats["lookups"], stats["last_lookup_error"])}], scope="reconciler")
+    else:
+        _alert([], scope="reconciler")
+    return {"recovered": recovered, "ledger_checked": len(ledger), **stats}
 
 def _janitor_loop():
     while True:
@@ -394,12 +446,15 @@ def process(d):
                    "address1": (d.get("street_address") or "").strip(),
                    "city": (d.get("city") or "").strip(),
                    "postalCode": (d.get("zip") or "").strip(),
-                   "tags": tags,
                    "source": (d.get("utm_source") or "").strip() or "Funnel"}
         if phone: payload["phone"] = phone
         if email: payload["email"] = email
         c = ghl("/contacts/upsert", payload)
         cid = c["contact"]["id"]
+        # Tags are ADDED after the upsert, never passed to it: GHL upsert replaces the whole tag
+        # list, so a returning lead re-submitting the form would lose drip / opt-out state.
+        try: ghl("/contacts/" + cid + "/tags", {"tags": tags})
+        except Exception: pass
         interest = d.get("interest") or "not specified"
         note = ("Funnel lead from " + (d.get("page_source") or "funnel page") +
                 "\nInterest: " + interest +
