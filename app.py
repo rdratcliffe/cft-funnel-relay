@@ -515,8 +515,12 @@ class H(BaseHTTPRequestHandler):
             if not key_ok:
                 self._send(401, {"ok": False, "error": "key required"}); return
             if qs.get("refresh", ["0"])[0] == "1" or DASH["data"] is None:
-                _collect_now()
-            self._send(200, {"ok": True, "stale_seconds": int(_time.time() - DASH["ts"]) if DASH["ts"] else None,
+                # A full collect now takes ~5 min (it reads the whole cohort, not the first 100
+                # contacts); never run it inline on the single-threaded server that also serves
+                # the funnel lead endpoint. Kick it off; the client polls without refresh.
+                if not DASH["running"]:
+                    threading.Thread(target=_collect_now, daemon=True).start()
+            self._send(200, {"ok": True, "running": DASH["running"], "stale_seconds": int(_time.time() - DASH["ts"]) if DASH["ts"] else None,
                              "janitor": DASH["janitor"], "drip": DASH["drip"], "reconciler": DASH.get("reconciler"), "alert_status": DASH.get("alert_status"),
                              "net": {k: (len(v) if isinstance(v, list) else v) for k, v in (DASH.get("net") or {}).items() if k in ("generated_at", "untouched_leads", "waiting_on_reply", "delivery", "errors")},
                              "report": DASH["data"]})
