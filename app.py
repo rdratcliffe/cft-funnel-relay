@@ -24,6 +24,20 @@ DRIP_MSGS = {}  # filled from env DRIP_MSG_1..5 so copy changes never need a cod
 DRIP_STOP_TAGS = {"no-sms", "duplicate-merge-needed", "customer replied stop",
                   "out of area", "no longer interested", "dnd"}
 
+# ---- Call tasks: due when the call is due, on the setter's list ----
+# Tasks used to be created due 2099-01-01 and unassigned, so GHL never showed them
+# on anyone's list and never flagged them late: the 5-minute clock had no alarm.
+SETTER_GHL_USER_ID = os.environ.get("SETTER_GHL_USER_ID", "dE32xnrx7qKVKfAyFtTC")  # Michelle Rusticus
+
+def _call_task(title, body, minutes=5, now=None):
+    """GHL task payload due `minutes` from now, assigned to the setter. Pure; testable."""
+    now = now or datetime.now(timezone.utc)
+    t = {"title": title, "body": body, "completed": False,
+         "dueDate": (now + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    if SETTER_GHL_USER_ID:
+        t["assignedTo"] = SETTER_GHL_USER_ID
+    return t
+
 def _drip_eligible(c, start):
     """(eligible, reason). Pure function of a contact record so it is testable."""
     added = c.get("dateAdded") if isinstance(c.get("dateAdded"), str) else ""
@@ -329,8 +343,7 @@ def _reconcile_ledger():
                        lambda: ghl("/opportunities/", {"locationId": loc, "pipelineId": os.environ["PIPELINE_ID"],
                             "pipelineStageId": os.environ["STAGE_ID"], "contactId": cid, "status": "open",
                             "name": (first + " " + last).strip() + " - " + interest}),
-                       lambda: ghl("/contacts/" + cid + "/tasks", {"title": "CALL RECOVERED LEAD NOW: " + first + " +1" + ph,
-                            "body": note, "dueDate": "2099-01-01T00:00:00Z", "completed": False})):
+                       lambda: ghl("/contacts/" + cid + "/tasks", _call_task("CALL RECOVERED LEAD NOW: " + first + " +1" + ph, note, minutes=0))):
                 try: fn()
                 except Exception: pass
             phones.add(ph)
@@ -470,12 +483,11 @@ def process(d):
                 "pipelineStageId": os.environ["STAGE_ID"], "contactId": cid,
                 "status": "open",
                 "name": (first + " " + (d.get("last_name") or "")).strip() + " - " + interest}),
-            lambda: ghl("/contacts/" + cid + "/tasks", {
-                "title": "CALL NEW FUNNEL LEAD within 5 min: " + first + " " + (phone or email),
-                "body": note, "dueDate": "2099-01-01T00:00:00Z", "completed": False}),
+            lambda: ghl("/contacts/" + cid + "/tasks", _call_task(
+                "CALL NEW FUNNEL LEAD within 5 min: " + first + " " + (phone or email), note, minutes=5)),
         ):
             try: call()
-            except Exception: pass
+            except Exception as e: print("lead fan-out step failed:", str(e)[:300], flush=True)
         return 200, {"ok": True}
     except Exception as e:
         return 200, {"ok": False, "error": str(e)[:200]}

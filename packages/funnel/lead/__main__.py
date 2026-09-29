@@ -1,5 +1,6 @@
 """CFT funnel lead intake: form POST -> GHL contact + tags + note + opportunity + task."""
 import os, json, base64, urllib.request
+from datetime import datetime, timedelta, timezone
 
 GHL = "https://services.leadconnectorhq.com"
 CORS = {"Access-Control-Allow-Origin": "*",
@@ -78,7 +79,9 @@ def main(event):
                 "name": (first + " " + (d.get("last_name") or "")).strip() + " - " + interest}),
             lambda: ghl("/contacts/" + cid + "/tasks", {
                 "title": "CALL NEW FUNNEL LEAD within 5 min: " + first + " " + (phone or email),
-                "body": note, "dueDate": "2099-01-01T00:00:00Z", "completed": False}),
+                "body": note, "completed": False,
+                "assignedTo": os.environ.get("SETTER_GHL_USER_ID", "dE32xnrx7qKVKfAyFtTC"),
+                "dueDate": (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")}),
         ):
             try: call()
             except Exception: pass
